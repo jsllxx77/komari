@@ -214,10 +214,14 @@ jobs:
             --prerelease \
             artifacts/komari-*
 
-          gh workflow run generate-release-notes.yml \
+          # AI 生成的 release notes 是可选的：该工作流未注册或缺少 OPENAI 密钥时，
+          # 保留上面的默认说明，不影响清理旧快照和推送 Docker 镜像。
+          if ! gh workflow run generate-release-notes.yml \
             --repo "${{ github.repository }}" \
             --ref main \
-            -f tag="${VERSION}"
+            -f tag="${VERSION}"; then
+            echo "::warning::Could not dispatch generate-release-notes.yml; keeping the default release notes."
+          fi
 
           gh release list \
             --repo "${{ github.repository }}" \
