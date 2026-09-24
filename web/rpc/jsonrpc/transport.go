@@ -97,6 +97,7 @@ func serveWebSocket(c *gin.Context) {
 	defer conn.Close()
 
 	meta := buildContextMeta(c)
+	conn.GetConn().SetReadLimit(rpcBodyLimit(meta))
 	for {
 		var req rpc.JsonRpcRequest
 		if err := conn.ReadJSON(&req); err != nil {
@@ -119,9 +120,15 @@ func serveWebSocket(c *gin.Context) {
 }
 
 func servePost(c *gin.Context) {
-	body, err := io.ReadAll(c.Request.Body)
+	meta := buildContextMeta(c)
+	body, err := io.ReadAll(http.MaxBytesReader(c.Writer, c.Request.Body, rpcBodyLimit(meta)))
 	if err != nil {
-		c.JSON(http.StatusBadRequest, rpc.ErrorResponse(nil, rpc.ParseError, "read body error", err.Error()))
+		status := http.StatusBadRequest
+		var tooLarge *http.MaxBytesError
+		if errors.As(err, &tooLarge) {
+			status = http.StatusRequestEntityTooLarge
+		}
+		c.JSON(status, rpc.ErrorResponse(nil, rpc.ParseError, "read body error", err.Error()))
 		return
 	}
 	requests, jerr := rpc.ParseRequests(body)
@@ -129,7 +136,6 @@ func servePost(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, jerr.Response())
 		return
 	}
-	meta := buildContextMeta(c)
 
 	responses := make([]*rpc.JsonRpcResponse, 0, len(requests))
 	for _, rreq := range requests {
@@ -141,6 +147,21 @@ func servePost(c *gin.Context) {
 	} else {
 		c.JSON(http.StatusOK, responses)
 	}
+}
+
+const (
+	// maxAnonymousRPCBody 限制匿名调用方单个 HTTP 请求体或 WebSocket 消息的大小。
+	maxAnonymousRPCBody int64 = 1 << 20
+	// maxRPCBody 限制已认证调用方单个 HTTP 请求体或 WebSocket 消息的大小。
+	maxRPCBody int64 = 32 << 20
+)
+
+// rpcBodyLimit 按调用主体返回允许的请求大小，匿名访客使用更严格的限制。
+func rpcBodyLimit(meta *rpc.ContextMeta) int64 {
+	if meta == nil || meta.Principal == nil || meta.Principal.Type == rpc.PrincipalAnonymous {
+		return maxAnonymousRPCBody
+	}
+	return maxRPCBody
 }
 
 // buildContextMeta 从 gin.Context 构建 *rpc.ContextMeta。

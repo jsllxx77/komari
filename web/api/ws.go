@@ -12,6 +12,9 @@ import (
 	agent_runtime "github.com/komari-monitor/komari/web/agent"
 )
 
+// maxClientsMessageSize 限制 /api/clients WebSocket 单条消息的大小。
+const maxClientsMessageSize = 4 << 10
+
 func GetClients(c *gin.Context) {
 	// 升级到ws
 	if !IsWebSocketUpgrade(c) {
@@ -25,6 +28,8 @@ func GetClients(c *gin.Context) {
 		return
 	}
 	defer conn.Close()
+	// 该端点无需认证，客户端只会发送 "get" / "get <uuid>" 这类短消息。
+	conn.GetConn().SetReadLimit(maxClientsMessageSize)
 
 	// 初始化用户信息
 	var (

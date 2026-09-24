@@ -42,7 +42,24 @@ const (
 	// Keep an independent budget for report flushing and store teardown. Reusing
 	// the HTTP deadline here can skip queued metric writes after a slow request.
 	resourceCleanupTimeout = 30 * time.Second
+	// Bound how long a client may take to send request headers so slow or
+	// idle connections cannot pin goroutines and file descriptors.
+	httpReadHeaderTimeout = 10 * time.Second
+	// Close keep-alive connections that sit idle between requests.
+	httpIdleTimeout = 120 * time.Second
 )
+
+// newHTTPServer applies the process-wide connection timeouts. Whole-request
+// read/write timeouts stay unset because WebSocket, terminal and file
+// transfer streams are long-lived.
+func newHTTPServer(addr string, handler http.Handler) *http.Server {
+	return &http.Server{
+		Addr:              addr,
+		Handler:           handler,
+		ReadHeaderTimeout: httpReadHeaderTimeout,
+		IdleTimeout:       httpIdleTimeout,
+	}
+}
 
 // StartBackground starts scheduled work after all stores are ready.
 func (a *App) StartBackground() error {
@@ -116,7 +133,7 @@ func (a *App) Run() error {
 	// The HTML injector runs outside the hook chain so it sees the final
 	// response: plugin hooks can still rewrite the body, then the registered
 	// head/body fragments are embedded into every text/html page.
-	a.server = &http.Server{Addr: a.listenAddr, Handler: plugin.HTMLInjectHandler(plugin.WrapHandler(a.engine))}
+	a.server = newHTTPServer(a.listenAddr, plugin.HTMLInjectHandler(plugin.WrapHandler(a.engine)))
 	serverErr := make(chan error, 1)
 	logger.Infof("server", "Starting server on %s ...", a.listenAddr)
 	go func() {

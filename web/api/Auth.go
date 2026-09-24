@@ -175,26 +175,34 @@ func extractClientToken(c *gin.Context) string {
 		return token
 	}
 
-	if c.Request.Method != http.MethodGet {
-		bodyBytes, err := io.ReadAll(c.Request.Body)
-		if err != nil {
+	if c.Request.Method != http.MethodGet && c.Request.Body != nil {
+		// 该中间件对所有未认证请求运行，只预读有限长度的请求体，避免匿名大请求耗尽内存。
+		// 已读取的前缀会拼回剩余的原始 body，下游 handler 仍能读到完整内容。
+		original := c.Request.Body
+		prefix, err := io.ReadAll(io.LimitReader(original, maxTokenBodyPeek+1))
+		c.Request.Body = prefixedBody{Reader: io.MultiReader(bytes.NewReader(prefix), original), Closer: original}
+		if err != nil || len(prefix) == 0 || len(prefix) > maxTokenBodyPeek {
 			return ""
 		}
-		c.Request.Body = io.NopCloser(bytes.NewReader(bodyBytes))
 
-		var bodyMap map[string]interface{}
-		if len(bodyBytes) > 0 {
-			if err := json.Unmarshal(bodyBytes, &bodyMap); err == nil {
-				if tokenVal, exists := bodyMap["token"]; exists {
-					if str, ok := tokenVal.(string); ok && str != "" {
-						return str
-					}
-				}
-			}
+		var body struct {
+			Token string `json:"token"`
+		}
+		if err := json.Unmarshal(prefix, &body); err == nil && body.Token != "" {
+			return body.Token
 		}
 	}
 
 	return ""
+}
+
+// maxTokenBodyPeek 为在请求体中查找旧版 {"token": "..."} 字段时允许缓冲的最大字节数。
+const maxTokenBodyPeek = 256 << 10
+
+// prefixedBody 将已预读的前缀与未读部分重新组合为请求体，并保留原始 body 的 Close。
+type prefixedBody struct {
+	io.Reader
+	io.Closer
 }
 
 func checkTokenAndGetUUID(token string) (string, error) {

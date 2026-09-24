@@ -56,7 +56,7 @@ func (a *App) runGuideServer(controller guideController, cfg guideServerConfig) 
 		r.NoRoute(guideNoRoute(cfg.pagePath, cfg.missingAPI, handlers))
 	})
 
-	server := &http.Server{Addr: a.listenAddr, Handler: r}
+	server := newHTTPServer(a.listenAddr, r)
 	a.engine = r
 	a.server = server
 	serverErr := make(chan error, 1)

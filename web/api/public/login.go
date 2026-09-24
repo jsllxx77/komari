@@ -22,6 +22,9 @@ type LoginRequest struct {
 
 const sessionCookieMaxAge = 2592000
 
+// maxLoginBodySize 限制登录请求体大小；登录接口无需认证即可访问。
+const maxLoginBodySize = 64 << 10
+
 func setSessionCookie(c *gin.Context, value string, maxAge int) {
 	http.SetCookie(c.Writer, &http.Cookie{
 		Name:     "session_token",
@@ -41,7 +44,7 @@ func Login(c *gin.Context) {
 		return
 	}
 
-	bodyBytes, err := io.ReadAll(c.Request.Body)
+	bodyBytes, err := io.ReadAll(http.MaxBytesReader(c.Writer, c.Request.Body, maxLoginBodySize))
 	if err != nil {
 		api.RespondError(c, http.StatusBadRequest, "Invalid request body: "+err.Error())
 		return
