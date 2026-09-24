@@ -51,6 +51,8 @@ log_step() {
 INSTALL_DIR="/opt/komari"
 DATA_DIR="/opt/komari"
 SERVICE_NAME="komari"
+# 服务以该系统用户运行，仅对数据目录有写权限。
+SERVICE_USER="komari"
 BINARY_PATH="$INSTALL_DIR/komari"
 BACKUP_DIR="$INSTALL_DIR/backup"
 DATA_BACKUP_DIR="$DATA_DIR/data/backup"
@@ -346,6 +348,18 @@ msg() {
         systemd_created)
             en_text='systemd service file created.'
             zh_text='systemd 服务文件创建完成。'
+            ;;
+        service_user_create)
+            en_text='Creating service user %s...'
+            zh_text='创建服务用户 %s...'
+            ;;
+        service_user_failed)
+            en_text='Failed to create service user %s.'
+            zh_text='创建服务用户 %s 失败。'
+            ;;
+        service_user_migrate)
+            en_text='Switching the service to run as %s instead of root...'
+            zh_text='将服务改为以 %s 用户运行（不再使用 root）...'
             ;;
         access_info)
             en_text='Access URL:\n  http://%s:%s\n\nCreate the administrator account in your browser.\n\nService commands:\n  Status: systemctl status %s\n  Start: systemctl start %s\n  Stop: systemctl stop %s\n  Restart: systemctl restart %s\n  Logs: journalctl -u %s -f'
@@ -1166,6 +1180,10 @@ install_binary() {
     fi
 
     progress_add "$(msg progress_service)"
+    if ! ensure_service_user; then
+        ui_msgbox "$(msg title_error)" "$(msg service_user_failed "$SERVICE_USER")"
+        return 1
+    fi
     create_systemd_service "$LISTEN_PORT"
 
     systemctl daemon-reload
@@ -1183,10 +1201,58 @@ install_binary() {
     fi
 }
 
+# 创建运行服务的系统用户，并把数据目录交给它。
+# 二进制仍归 root 所有，服务进程无法替换自身。
+ensure_service_user() {
+    if ! id -u "$SERVICE_USER" >/dev/null 2>&1; then
+        log_step "$(msg service_user_create "$SERVICE_USER")"
+        local nologin_shell
+        nologin_shell=$(command -v nologin 2>/dev/null || echo /bin/false)
+        if command -v useradd >/dev/null 2>&1; then
+            useradd --system --home-dir "$DATA_DIR" --no-create-home --shell "$nologin_shell" "$SERVICE_USER" || return 1
+        elif command -v adduser >/dev/null 2>&1; then
+            adduser -S -D -H -h "$DATA_DIR" -s "$nologin_shell" "$SERVICE_USER" || return 1
+        else
+            return 1
+        fi
+    fi
+    mkdir -p "$DATA_DIR/data" || return 1
+    chown -R "$SERVICE_USER" "$DATA_DIR/data"
+}
+
+# 旧版本脚本生成的服务以 root 运行，升级时改为专用用户。
+# 已手动修改过 User= 的服务文件保持不变。
+migrate_service_user() {
+    local service_file="/etc/systemd/system/${SERVICE_NAME}.service"
+    if [ ! -f "$service_file" ] || ! grep -qx 'User=root' "$service_file"; then
+        return 0
+    fi
+    log_step "$(msg service_user_migrate "$SERVICE_USER")"
+    if ! ensure_service_user; then
+        # 无法创建用户时保持原样运行，不让升级失败。
+        log_error "$(msg service_user_failed "$SERVICE_USER")"
+        return 0
+    fi
+    local port replacement
+    port=$(sed -n 's/^ExecStart=.*:\([0-9][0-9]*\)$/\1/p' "$service_file" | head -n 1)
+    replacement="User=${SERVICE_USER}"
+    if [ -n "$port" ] && [ "$port" -lt 1024 ]; then
+        replacement="${replacement}\nAmbientCapabilities=CAP_NET_BIND_SERVICE"
+    fi
+    sed -i "s/^User=root\$/${replacement}/" "$service_file"
+    systemctl daemon-reload
+}
+
 # Create systemd service file
 create_systemd_service() {
     local port="$1"
     log_step "$(msg systemd_start)"
+
+    # 非 root 用户绑定 1024 以下端口需要该能力。
+    local bind_capability=""
+    if [ "$port" -lt 1024 ]; then
+        bind_capability="AmbientCapabilities=CAP_NET_BIND_SERVICE"
+    fi
 
     local service_file="/etc/systemd/system/${SERVICE_NAME}.service"
     cat > "$service_file" << EOF
@@ -1199,7 +1265,8 @@ Type=simple
 ExecStart=${BINARY_PATH} server -l 0.0.0.0:${port}
 WorkingDirectory=${DATA_DIR}
 Restart=always
-User=root
+User=${SERVICE_USER}
+${bind_capability}
 
 [Install]
 WantedBy=multi-user.target
@@ -1300,6 +1367,7 @@ upgrade_komari() {
     fi
 
     chmod +x "$BINARY_PATH"
+    migrate_service_user
 
     progress_add "$(msg progress_restart)"
     log_step "$(msg restart_start)"
