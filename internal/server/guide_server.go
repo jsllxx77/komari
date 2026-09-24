@@ -41,6 +41,9 @@ func (a *App) runGuideServer(controller guideController, cfg guideServerConfig) 
 	defer controller.Deactivate()
 
 	r := gin.New()
+	if err := security.ApplyTrustedProxies(r, a.trustedProxies); err != nil {
+		return false, fmt.Errorf("invalid trusted proxies: %w", err)
+	}
 	r.Use(logger.GinLogger(), logger.GinRecovery(), noStoreAPIResponses())
 	if cfg.requireIdentity {
 		cors := security.NewCorsController(a.settings.CorsOriginCheckEnabled, a.settings.CorsAllowedOrigins)

@@ -104,6 +104,9 @@ func (a *App) registerReloadHandlers(cors *security.CorsController) {
 // BuildRouter constructs the normal application router and starts reloads.
 func (a *App) BuildRouter() error {
 	r := gin.New()
+	if err := security.ApplyTrustedProxies(r, a.trustedProxies); err != nil {
+		return fmt.Errorf("invalid trusted proxies: %w", err)
+	}
 	r.Use(logger.GinLogger(), logger.GinRecovery())
 	cors := security.NewCorsController(a.settings.CorsOriginCheckEnabled, a.settings.CorsAllowedOrigins)
 	r.Use(cors.Middleware(), api.IdentityMiddleware(), api.PrivateSiteMiddleware(), noStoreAPIResponses())

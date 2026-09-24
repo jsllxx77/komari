@@ -18,6 +18,7 @@ type cleanupFunc struct {
 // bootstrap, metric store, providers, guides, router, and runtime.
 type App struct {
 	listenAddr              string
+	trustedProxies          string
 	settings                *config.Settings
 	engine                  *gin.Engine
 	server                  *http.Server
@@ -32,12 +33,15 @@ type App struct {
 // Options configures the process-wide application runtime.
 type Options struct {
 	ListenAddr string
+	// TrustedProxies lists the reverse proxies allowed to report the client
+	// IP; see security.ParseTrustedProxies for the accepted values.
+	TrustedProxies string
 }
 
 // New constructs an empty application. Initialization happens in the
 // explicit lifecycle phases called by the command entrypoint.
 func New(options Options) *App {
-	return &App{listenAddr: options.ListenAddr, reload: NewReloadManager()}
+	return &App{listenAddr: options.ListenAddr, trustedProxies: options.TrustedProxies, reload: NewReloadManager()}
 }
 
 // addCleanup registers a cleanup action. Shutdown executes actions in LIFO
