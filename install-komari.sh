@@ -58,13 +58,10 @@ BACKUP_DIR="$INSTALL_DIR/backup"
 DATA_BACKUP_DIR="$DATA_DIR/data/backup"
 DEFAULT_PORT="25774"
 LISTEN_PORT=""
-STANDARD_REPO="komari-monitor/komari"
-LITE_REPO="nuomiiiii/komari"
-REPO="$STANDARD_REPO"
-# 发行版本: standard（标准版）或 lite（Lite 轻量版）
-EDITION="standard"
-EDITION_NAME=""
-# 发布通道: stable（稳定版）或 snapshot（快照版）；Lite 仅支持 stable
+# 下载二进制所用的 GitHub 仓库（owner/repo），可通过环境变量 KOMARI_REPO 覆盖。
+REPO="${KOMARI_REPO:-jsllxx77/komari}"
+EDITION_NAME="Komari"
+# 发布通道: stable（稳定版）或 snapshot（快照版）
 CHANNEL="stable"
 CHANNEL_NAME=""
 # 语言: en（English）或 zh（简体中文）
@@ -149,34 +146,6 @@ msg() {
             en_text='Please run this script as root.'
             zh_text='请使用 root 权限运行此脚本。'
             ;;
-        edition_title)
-            en_text='Choose an edition'
-            zh_text='选择安装版本'
-            ;;
-        edition_prompt)
-            en_text='Komari has multiple editions with different features and performance profiles. Choose the one that fits your controller.\n\nChoose the edition to install [default 1]:'
-            zh_text='Komari 目前提供多个版本，不同版本在功能和性能上有所差异，请根据主控配置选择。\n\n请选择安装的版本（默认 1）：'
-            ;;
-        edition_standard)
-            en_text='Standard edition'
-            zh_text='标准版本'
-            ;;
-        edition_lite)
-            en_text='Lite edition - optimized for low-resource controllers with a streamlined feature set (maintained by @nuomiiiii)'
-            zh_text='Lite 版本 - 改善低配置主控下的性能，精简复杂功能（由 @nuomiiiii 维护）'
-            ;;
-        edition_name_standard)
-            en_text='Komari Standard'
-            zh_text='Komari 标准版'
-            ;;
-        edition_name_lite)
-            en_text='Komari Lite'
-            zh_text='Komari Lite 轻量版'
-            ;;
-        selected_edition)
-            en_text='Selected edition: %s'
-            zh_text='已选择版本：%s'
-            ;;
         channel_title)
             en_text='Choose a release channel'
             zh_text='选择发布通道'
@@ -204,14 +173,6 @@ msg() {
         selected_channel)
             en_text='Selected channel: %s'
             zh_text='已选择通道：%s'
-            ;;
-        progress_edition_standard)
-            en_text='Standard edition'
-            zh_text='标准版'
-            ;;
-        progress_edition_lite)
-            en_text='Lite edition'
-            zh_text='Lite 版本'
             ;;
         progress_download)
             en_text='Download Komari'
@@ -796,50 +757,9 @@ ASCII_ART
 }
 
 
-# 设置发行版本，结果写入全局变量 EDITION / REPO。
-select_edition() {
-    local choice
-    choice=$(ui_menu "$(msg edition_title)" "$(msg edition_prompt)" \
-        "1" "$(msg edition_standard)" \
-        "2" "$(msg edition_lite)")
-
-    case "$choice" in
-        lite|2)
-            EDITION="lite"
-            EDITION_NAME="$(msg edition_name_lite)"
-            REPO="$LITE_REPO"
-            ;;
-        standard|1|"")
-            EDITION="standard"
-            EDITION_NAME="$(msg edition_name_standard)"
-            REPO="$STANDARD_REPO"
-            ;;
-        *)
-            EDITION="standard"
-            EDITION_NAME="$(msg edition_name_standard)"
-            REPO="$STANDARD_REPO"
-            ;;
-    esac
-    if [ "$EDITION" = "lite" ]; then
-        progress_add "$(msg progress_edition_lite)"
-    else
-        progress_add "$(msg progress_edition_standard)"
-    fi
-    log_info "$(msg selected_edition "$EDITION_NAME")"
-}
-
 # 设置发布通道，结果写入全局变量 CHANNEL。
 select_channel() {
     local choice
-
-    if [ "$EDITION" = "lite" ]; then
-        CHANNEL="stable"
-        CHANNEL_NAME="$(msg channel_name_stable)"
-        progress_add "$CHANNEL_NAME"
-        log_info "$(msg selected_channel "$CHANNEL_NAME")"
-        return 0
-    fi
-
     choice=$(ui_menu "$(msg channel_title)" "$(msg channel_prompt)" \
         "1" "$(msg channel_stable)" \
         "2" "$(msg channel_snapshot)")
@@ -944,11 +864,6 @@ install_dependencies() {
 get_download_url() {
     local arch=$1
     local file_name="komari-linux-${arch}"
-
-    # Lite 仓库没有 snapshot 发布，始终使用正式版下载地址。
-    if [ "$EDITION" = "lite" ]; then
-        CHANNEL="stable"
-    fi
 
     if [ "$CHANNEL" = "snapshot" ]; then
         # 获取最新的 snapshot 预发布版本
@@ -1119,8 +1034,7 @@ install_binary() {
         return
     fi
 
-    # 选择发行版本和发布通道
-    select_edition
+    # 选择发布通道
     select_channel
 
     # 监听端口输入，校验范围 1-65535
@@ -1326,8 +1240,7 @@ upgrade_komari() {
         return 1
     fi
 
-    # 选择发行版本和发布通道
-    select_edition
+    # 选择发布通道
     select_channel
 
     log_step "$(msg stopping_service)"
