@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	logger "github.com/komari-monitor/komari/utils/log"
 	"io"
+	"net"
 	"net/http"
 	"strings"
 	"time"
@@ -115,6 +116,15 @@ func handleV2RPC(uuid string, req v2.Request, allowWait bool) v2.Response {
 			return v2.Error(req.ID, -32004, "unknown or expired file operation", nil)
 		}
 		return v2.Success(req.ID, gin.H{"status": "success"})
+	case v2.MethodAgentStartupConfigResult:
+		var params v2.StartupConfigResult
+		if err := bindV2Params(req.Params, &params); err != nil {
+			return v2.Error(req.ID, -32602, "invalid startup configuration result", nil)
+		}
+		if !agent_runtime.ResolveStartupConfig(uuid, params) {
+			return v2.Error(req.ID, -32004, "unknown or expired startup configuration request", nil)
+		}
+		return v2.Success(req.ID, gin.H{"status": "success"})
 	default:
 		return v2.Error(req.ID, -32601, "method not found", req.Method)
 	}
@@ -174,12 +184,15 @@ func WebSocketV2RPC(c *gin.Context) {
 	if !pushQueuedV2Events(conn, uuid) {
 		return
 	}
+	setWebSocketPingHandler(conn, v2WebSocketReadWait, v2WebSocketWriteWait)
 
 	for {
-		conn.SetReadDeadline(time.Now().Add(readWait))
+		conn.SetReadDeadline(time.Now().Add(v2WebSocketReadWait))
 		_, message, err := conn.ReadMessage()
 		if err != nil {
-			if websocket.IsUnexpectedCloseError(err, websocket.CloseGoingAway, websocket.CloseAbnormalClosure) {
+			if netErr, ok := err.(net.Error); ok && netErr.Timeout() {
+				logger.Errorf("client-api", "Client %s v2 heartbeat timed out after %s", uuid, v2WebSocketReadWait)
+			} else if websocket.IsUnexpectedCloseError(err, websocket.CloseGoingAway, websocket.CloseAbnormalClosure) {
 				logger.Errorf("client-api", "Client %s v2 connection error: %v", uuid, err)
 			}
 			return
