@@ -33,7 +33,7 @@ func (g *Github) GetAuthorizationURL(_ string) (string, string) {
 		url.QueryEscape(g.Addition.ClientId),
 		url.QueryEscape(state),
 	)
-	g.stateCache.Set(state, true, cache.NoExpiration)
+	g.stateCache.Set(state, true, cache.DefaultExpiration)
 	return authURL, state
 }
 func (g *Github) OnCallback(ctx *gin.Context, state string, query map[string]string, _ string) (factory.OidcCallback, error) {
@@ -50,6 +50,8 @@ func (g *Github) OnCallback(ctx *gin.Context, state string, query map[string]str
 	if state == "" {
 		return factory.OidcCallback{}, fmt.Errorf("invalid state")
 	}
+	// state 只能使用一次，防止被重放。
+	g.stateCache.Delete(state)
 
 	// 获取code
 	//code := c.Query("code")

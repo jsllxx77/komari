@@ -25,6 +25,8 @@ func init() {
 	// 从环境变量获取监听地址
 	listenAddr := GetEnv("KOMARI_LISTEN", "0.0.0.0:25774")
 	ServerCmd.PersistentFlags().StringVarP(&flags.Listen, "listen", "l", listenAddr, "监听地址 [env: KOMARI_LISTEN]")
+	ServerCmd.PersistentFlags().StringVar(&flags.TrustedProxies, "trusted-proxies", GetEnv("KOMARI_TRUSTED_PROXIES", ""),
+		"允许传递客户端真实 IP 的反向代理（IP/CIDR，逗号分隔；默认本机与内网地址，none 为不信任，* 为全部信任） [env: KOMARI_TRUSTED_PROXIES]")
 	RootCmd.AddCommand(ServerCmd)
 }
 
@@ -37,7 +39,7 @@ func RunServer() {
 		logger.Fatalf("server", "prepare default frontend failed: %v", err)
 	}
 
-	app := appserver.New(appserver.Options{ListenAddr: flags.Listen})
+	app := appserver.New(appserver.Options{ListenAddr: flags.Listen, TrustedProxies: flags.TrustedProxies})
 	if err := app.Bootstrap(); err != nil {
 		_ = app.Shutdown()
 		logger.Fatalf("server", "server startup failed at %q: %v", "bootstrap", err)

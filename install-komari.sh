@@ -51,18 +51,17 @@ log_step() {
 INSTALL_DIR="/opt/komari"
 DATA_DIR="/opt/komari"
 SERVICE_NAME="komari"
+# 服务以该系统用户运行，仅对数据目录有写权限。
+SERVICE_USER="komari"
 BINARY_PATH="$INSTALL_DIR/komari"
 BACKUP_DIR="$INSTALL_DIR/backup"
 DATA_BACKUP_DIR="$DATA_DIR/data/backup"
 DEFAULT_PORT="25774"
 LISTEN_PORT=""
-STANDARD_REPO="komari-monitor/komari"
-LITE_REPO="nuomiiiii/komari"
-REPO="$STANDARD_REPO"
-# 发行版本: standard（标准版）或 lite（Lite 轻量版）
-EDITION="standard"
-EDITION_NAME=""
-# 发布通道: stable（稳定版）或 snapshot（快照版）；Lite 仅支持 stable
+# 下载二进制所用的 GitHub 仓库（owner/repo），可通过环境变量 KOMARI_REPO 覆盖。
+REPO="${KOMARI_REPO:-jsllxx77/komari}"
+EDITION_NAME="Komari"
+# 发布通道: stable（稳定版）或 snapshot（快照版）
 CHANNEL="stable"
 CHANNEL_NAME=""
 # 语言: en（English）或 zh（简体中文）
@@ -147,34 +146,6 @@ msg() {
             en_text='Please run this script as root.'
             zh_text='请使用 root 权限运行此脚本。'
             ;;
-        edition_title)
-            en_text='Choose an edition'
-            zh_text='选择安装版本'
-            ;;
-        edition_prompt)
-            en_text='Komari has multiple editions with different features and performance profiles. Choose the one that fits your controller.\n\nChoose the edition to install [default 1]:'
-            zh_text='Komari 目前提供多个版本，不同版本在功能和性能上有所差异，请根据主控配置选择。\n\n请选择安装的版本（默认 1）：'
-            ;;
-        edition_standard)
-            en_text='Standard edition'
-            zh_text='标准版本'
-            ;;
-        edition_lite)
-            en_text='Lite edition - optimized for low-resource controllers with a streamlined feature set (maintained by @nuomiiiii)'
-            zh_text='Lite 版本 - 改善低配置主控下的性能，精简复杂功能（由 @nuomiiiii 维护）'
-            ;;
-        edition_name_standard)
-            en_text='Komari Standard'
-            zh_text='Komari 标准版'
-            ;;
-        edition_name_lite)
-            en_text='Komari Lite'
-            zh_text='Komari Lite 轻量版'
-            ;;
-        selected_edition)
-            en_text='Selected edition: %s'
-            zh_text='已选择版本：%s'
-            ;;
         channel_title)
             en_text='Choose a release channel'
             zh_text='选择发布通道'
@@ -202,14 +173,6 @@ msg() {
         selected_channel)
             en_text='Selected channel: %s'
             zh_text='已选择通道：%s'
-            ;;
-        progress_edition_standard)
-            en_text='Standard edition'
-            zh_text='标准版'
-            ;;
-        progress_edition_lite)
-            en_text='Lite edition'
-            zh_text='Lite 版本'
             ;;
         progress_download)
             en_text='Download Komari'
@@ -346,6 +309,18 @@ msg() {
         systemd_created)
             en_text='systemd service file created.'
             zh_text='systemd 服务文件创建完成。'
+            ;;
+        service_user_create)
+            en_text='Creating service user %s...'
+            zh_text='创建服务用户 %s...'
+            ;;
+        service_user_failed)
+            en_text='Failed to create service user %s.'
+            zh_text='创建服务用户 %s 失败。'
+            ;;
+        service_user_migrate)
+            en_text='Switching the service to run as %s instead of root...'
+            zh_text='将服务改为以 %s 用户运行（不再使用 root）...'
             ;;
         access_info)
             en_text='Access URL:\n  http://%s:%s\n\nCreate the administrator account in your browser.\n\nService commands:\n  Status: systemctl status %s\n  Start: systemctl start %s\n  Stop: systemctl stop %s\n  Restart: systemctl restart %s\n  Logs: journalctl -u %s -f'
@@ -782,50 +757,9 @@ ASCII_ART
 }
 
 
-# 设置发行版本，结果写入全局变量 EDITION / REPO。
-select_edition() {
-    local choice
-    choice=$(ui_menu "$(msg edition_title)" "$(msg edition_prompt)" \
-        "1" "$(msg edition_standard)" \
-        "2" "$(msg edition_lite)")
-
-    case "$choice" in
-        lite|2)
-            EDITION="lite"
-            EDITION_NAME="$(msg edition_name_lite)"
-            REPO="$LITE_REPO"
-            ;;
-        standard|1|"")
-            EDITION="standard"
-            EDITION_NAME="$(msg edition_name_standard)"
-            REPO="$STANDARD_REPO"
-            ;;
-        *)
-            EDITION="standard"
-            EDITION_NAME="$(msg edition_name_standard)"
-            REPO="$STANDARD_REPO"
-            ;;
-    esac
-    if [ "$EDITION" = "lite" ]; then
-        progress_add "$(msg progress_edition_lite)"
-    else
-        progress_add "$(msg progress_edition_standard)"
-    fi
-    log_info "$(msg selected_edition "$EDITION_NAME")"
-}
-
 # 设置发布通道，结果写入全局变量 CHANNEL。
 select_channel() {
     local choice
-
-    if [ "$EDITION" = "lite" ]; then
-        CHANNEL="stable"
-        CHANNEL_NAME="$(msg channel_name_stable)"
-        progress_add "$CHANNEL_NAME"
-        log_info "$(msg selected_channel "$CHANNEL_NAME")"
-        return 0
-    fi
-
     choice=$(ui_menu "$(msg channel_title)" "$(msg channel_prompt)" \
         "1" "$(msg channel_stable)" \
         "2" "$(msg channel_snapshot)")
@@ -930,11 +864,6 @@ install_dependencies() {
 get_download_url() {
     local arch=$1
     local file_name="komari-linux-${arch}"
-
-    # Lite 仓库没有 snapshot 发布，始终使用正式版下载地址。
-    if [ "$EDITION" = "lite" ]; then
-        CHANNEL="stable"
-    fi
 
     if [ "$CHANNEL" = "snapshot" ]; then
         # 获取最新的 snapshot 预发布版本
@@ -1105,8 +1034,7 @@ install_binary() {
         return
     fi
 
-    # 选择发行版本和发布通道
-    select_edition
+    # 选择发布通道
     select_channel
 
     # 监听端口输入，校验范围 1-65535
@@ -1166,6 +1094,10 @@ install_binary() {
     fi
 
     progress_add "$(msg progress_service)"
+    if ! ensure_service_user; then
+        ui_msgbox "$(msg title_error)" "$(msg service_user_failed "$SERVICE_USER")"
+        return 1
+    fi
     create_systemd_service "$LISTEN_PORT"
 
     systemctl daemon-reload
@@ -1183,10 +1115,59 @@ install_binary() {
     fi
 }
 
+# 创建运行服务的系统用户，并把它需要写入的目录交给它：
+# data/ 存放数据，cache/ 用于每次启动时解压内置前端。
+# 二进制仍归 root 所有，服务进程无法替换自身。
+ensure_service_user() {
+    if ! id -u "$SERVICE_USER" >/dev/null 2>&1; then
+        log_step "$(msg service_user_create "$SERVICE_USER")"
+        local nologin_shell
+        nologin_shell=$(command -v nologin 2>/dev/null || echo /bin/false)
+        if command -v useradd >/dev/null 2>&1; then
+            useradd --system --home-dir "$DATA_DIR" --no-create-home --shell "$nologin_shell" "$SERVICE_USER" || return 1
+        elif command -v adduser >/dev/null 2>&1; then
+            adduser -S -D -H -h "$DATA_DIR" -s "$nologin_shell" "$SERVICE_USER" || return 1
+        else
+            return 1
+        fi
+    fi
+    mkdir -p "$DATA_DIR/data" "$DATA_DIR/cache" || return 1
+    chown -R "$SERVICE_USER" "$DATA_DIR/data" "$DATA_DIR/cache"
+}
+
+# 旧版本脚本生成的服务以 root 运行，升级时改为专用用户。
+# 已手动修改过 User= 的服务文件保持不变。
+migrate_service_user() {
+    local service_file="/etc/systemd/system/${SERVICE_NAME}.service"
+    if [ ! -f "$service_file" ] || ! grep -qx 'User=root' "$service_file"; then
+        return 0
+    fi
+    log_step "$(msg service_user_migrate "$SERVICE_USER")"
+    if ! ensure_service_user; then
+        # 无法创建用户时保持原样运行，不让升级失败。
+        log_error "$(msg service_user_failed "$SERVICE_USER")"
+        return 0
+    fi
+    local port replacement
+    port=$(sed -n 's/^ExecStart=.*:\([0-9][0-9]*\)$/\1/p' "$service_file" | head -n 1)
+    replacement="User=${SERVICE_USER}"
+    if [ -n "$port" ] && [ "$port" -lt 1024 ]; then
+        replacement="${replacement}\nAmbientCapabilities=CAP_NET_BIND_SERVICE"
+    fi
+    sed -i "s/^User=root\$/${replacement}/" "$service_file"
+    systemctl daemon-reload
+}
+
 # Create systemd service file
 create_systemd_service() {
     local port="$1"
     log_step "$(msg systemd_start)"
+
+    # 非 root 用户绑定 1024 以下端口需要该能力。
+    local bind_capability=""
+    if [ "$port" -lt 1024 ]; then
+        bind_capability="AmbientCapabilities=CAP_NET_BIND_SERVICE"
+    fi
 
     local service_file="/etc/systemd/system/${SERVICE_NAME}.service"
     cat > "$service_file" << EOF
@@ -1200,7 +1181,8 @@ Environment="GODEBUG=disablethp=1"
 ExecStart=${BINARY_PATH} server -l 0.0.0.0:${port}
 WorkingDirectory=${DATA_DIR}
 Restart=always
-User=root
+User=${SERVICE_USER}
+${bind_capability}
 
 [Install]
 WantedBy=multi-user.target
@@ -1260,8 +1242,7 @@ upgrade_komari() {
         return 1
     fi
 
-    # 选择发行版本和发布通道
-    select_edition
+    # 选择发布通道
     select_channel
 
     log_step "$(msg stopping_service)"
@@ -1301,6 +1282,7 @@ upgrade_komari() {
     fi
 
     chmod +x "$BINARY_PATH"
+    migrate_service_user
 
     progress_add "$(msg progress_restart)"
     log_step "$(msg restart_start)"

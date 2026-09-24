@@ -563,6 +563,7 @@ func downloadFile(c *gin.Context, clientUUID, path string, options downloadRespo
 		}
 		c.Header("Content-Type", contentType)
 		c.Header("Content-Disposition", formatDownloadContentDisposition(disposition, name, options.OfficeCompatible))
+		setDownloadSecurityHeaders(c.Writer.Header(), contentType)
 		c.Header("Accept-Ranges", "bytes")
 		c.Header("Content-Length", strconv.FormatInt(contentLength, 10))
 		c.Header("Content-Encoding", "identity")
@@ -725,6 +726,33 @@ func PreviewDownload(c *gin.Context) {
 		Filename:         filename,
 		OfficeCompatible: true,
 	})
+}
+
+// setDownloadSecurityHeaders keeps file bytes relayed from a managed node
+// from running as a page on the panel origin: MIME sniffing is disabled and
+// formats that can carry script (HTML, SVG, XML) are rendered in an opaque,
+// script-less sandbox, so a crafted file cannot act with the viewer's session.
+func setDownloadSecurityHeaders(header http.Header, contentType string) {
+	header.Set("X-Content-Type-Options", "nosniff")
+	if isActiveContentType(contentType) {
+		header.Set("Content-Security-Policy", "sandbox")
+	}
+}
+
+// isActiveContentType reports whether browsers may execute script embedded
+// in a document of this media type.
+func isActiveContentType(contentType string) bool {
+	mediaType, _, err := mime.ParseMediaType(contentType)
+	if err != nil {
+		mediaType = strings.TrimSpace(strings.SplitN(contentType, ";", 2)[0])
+	}
+	mediaType = strings.ToLower(mediaType)
+	switch mediaType {
+	case "text/html", "application/xhtml+xml", "image/svg+xml",
+		"text/xml", "application/xml", "text/xsl", "application/xslt+xml":
+		return true
+	}
+	return strings.HasSuffix(mediaType, "+xml") || strings.Contains(mediaType, "html")
 }
 
 func formatDownloadContentDisposition(disposition, name string, officeCompatible bool) string {

@@ -197,3 +197,31 @@ func resetUploadSessionsForTest() {
 	}
 	uploadMu.Unlock()
 }
+
+func TestSetDownloadSecurityHeaders(t *testing.T) {
+	tests := []struct {
+		contentType string
+		sandboxed   bool
+	}{
+		{"text/html; charset=utf-8", true},
+		{"image/svg+xml", true},
+		{"application/xhtml+xml", true},
+		{"text/xml; charset=utf-8", true},
+		{"application/rss+xml", true},
+		{"image/png", false},
+		{"application/pdf", false},
+		{"text/plain; charset=utf-8", false},
+		{"application/octet-stream", false},
+	}
+	for _, tt := range tests {
+		header := http.Header{}
+		setDownloadSecurityHeaders(header, tt.contentType)
+		if got := header.Get("X-Content-Type-Options"); got != "nosniff" {
+			t.Errorf("%s: X-Content-Type-Options = %q, want nosniff", tt.contentType, got)
+		}
+		gotSandbox := header.Get("Content-Security-Policy") == "sandbox"
+		if gotSandbox != tt.sandboxed {
+			t.Errorf("%s: sandboxed = %v, want %v", tt.contentType, gotSandbox, tt.sandboxed)
+		}
+	}
+}

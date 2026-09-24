@@ -2,8 +2,12 @@ package public
 
 import (
 	"encoding/json"
+	"fmt"
 	"io"
+	"math"
 	"net/http"
+	"strconv"
+	"time"
 
 	"github.com/komari-monitor/komari/database/accounts"
 	"github.com/komari-monitor/komari/database/auditlog"
@@ -21,6 +25,9 @@ type LoginRequest struct {
 }
 
 const sessionCookieMaxAge = 2592000
+
+// maxLoginBodySize 限制登录请求体大小；登录接口无需认证即可访问。
+const maxLoginBodySize = 64 << 10
 
 func setSessionCookie(c *gin.Context, value string, maxAge int) {
 	http.SetCookie(c.Writer, &http.Cookie{
@@ -41,7 +48,14 @@ func Login(c *gin.Context) {
 		return
 	}
 
-	bodyBytes, err := io.ReadAll(c.Request.Body)
+	clientIP := c.ClientIP()
+	if allowed, retryAfter := loginAttempts.Allow(clientIP, time.Now()); !allowed {
+		c.Header("Retry-After", strconv.Itoa(int(math.Ceil(retryAfter.Seconds()))))
+		api.RespondError(c, http.StatusTooManyRequests, "Too many failed login attempts, please try again later")
+		return
+	}
+
+	bodyBytes, err := io.ReadAll(http.MaxBytesReader(c.Writer, c.Request.Body, maxLoginBodySize))
 	if err != nil {
 		api.RespondError(c, http.StatusBadRequest, "Invalid request body: "+err.Error())
 		return
@@ -59,6 +73,7 @@ func Login(c *gin.Context) {
 
 	uuid, success := accounts.CheckPassword(data.Username, data.Password)
 	if !success {
+		recordLoginFailure(clientIP)
 		api.RespondError(c, http.StatusUnauthorized, "Invalid credentials")
 		return
 	}
@@ -70,6 +85,7 @@ func Login(c *gin.Context) {
 			return
 		}
 		if ok, err := accounts.Verify2Fa(uuid, data.TwoFa); err != nil || !ok {
+			recordLoginFailure(clientIP)
 			api.RespondError(c, http.StatusUnauthorized, "Invalid 2FA code")
 			return
 		}
@@ -80,10 +96,19 @@ func Login(c *gin.Context) {
 		api.RespondError(c, http.StatusInternalServerError, "Failed to create session: "+err.Error())
 		return
 	}
+	loginAttempts.Reset(clientIP)
 	setSessionCookie(c, session, sessionCookieMaxAge)
-	auditlog.Log(c.ClientIP(), uuid, "logged in (password)", "login")
+	auditlog.Log(clientIP, uuid, "logged in (password)", "login")
 	api.RespondSuccess(c, gin.H{"set-cookie": gin.H{"session_token": session}})
 }
+
+// recordLoginFailure 记录一次失败登录，并在该地址刚被限流时写入审计日志。
+func recordLoginFailure(clientIP string) {
+	if loginAttempts.Fail(clientIP, time.Now()) {
+		auditlog.Log(clientIP, "", fmt.Sprintf("password login blocked for %s after %d failed attempts", loginFailureWindow, loginFailureLimit), "warn")
+	}
+}
+
 func Logout(c *gin.Context) {
 	session, _ := c.Cookie("session_token")
 	accounts.DeleteSession(session)
