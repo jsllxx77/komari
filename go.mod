@@ -1,8 +1,6 @@
 module github.com/komari-monitor/komari
 
-go 1.26.0
-
-toolchain go1.26.8
+go 1.26.8
 
 require (
 	github.com/dop251/goja v0.0.0-20251008123653-cf18d89f3cf6
