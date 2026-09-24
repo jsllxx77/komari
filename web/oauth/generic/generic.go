@@ -49,6 +49,8 @@ func (g *Generic) OnCallback(ctx *gin.Context, state string, query map[string]st
 	if state == "" {
 		return factory.OidcCallback{}, fmt.Errorf("invalid state")
 	}
+	// state 只能使用一次，防止被重放。
+	g.stateCache.Delete(state)
 
 	// 获取code
 	if code == "" {

@@ -92,6 +92,8 @@ func (q *QQ) OnCallback(ctx *gin.Context, state string, query map[string]string,
 	if state == "" {
 		return factory.OidcCallback{}, fmt.Errorf("invalid state")
 	}
+	// state 只能使用一次，防止被重放。
+	q.stateCache.Delete(state)
 
 	// 检查是否提供了Authorization Code
 	if code == "" {
