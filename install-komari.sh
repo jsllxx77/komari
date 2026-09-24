@@ -1115,7 +1115,8 @@ install_binary() {
     fi
 }
 
-# 创建运行服务的系统用户，并把数据目录交给它。
+# 创建运行服务的系统用户，并把它需要写入的目录交给它：
+# data/ 存放数据，cache/ 用于每次启动时解压内置前端。
 # 二进制仍归 root 所有，服务进程无法替换自身。
 ensure_service_user() {
     if ! id -u "$SERVICE_USER" >/dev/null 2>&1; then
@@ -1130,8 +1131,8 @@ ensure_service_user() {
             return 1
         fi
     fi
-    mkdir -p "$DATA_DIR/data" || return 1
-    chown -R "$SERVICE_USER" "$DATA_DIR/data"
+    mkdir -p "$DATA_DIR/data" "$DATA_DIR/cache" || return 1
+    chown -R "$SERVICE_USER" "$DATA_DIR/data" "$DATA_DIR/cache"
 }
 
 # 旧版本脚本生成的服务以 root 运行，升级时改为专用用户。
