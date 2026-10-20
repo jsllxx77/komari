@@ -6,6 +6,7 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"strings"
 	"time"
 
 	"github.com/gin-gonic/gin"
@@ -25,10 +26,18 @@ func (q *QQ) GetConfiguration() factory.Configuration {
 func (q *QQ) GetAuthorizationURL(redirectURI string) (string, string) {
 	state := utils.GenerateRandomString(16)
 
+	// 聚合登录平台不会回传 state，所以把它放进我们自己的回调地址：
+	// 回调时用 ?ks=<state> 与 cookie 里的 state 比对，杜绝登录/绑定 CSRF。
+	sep := "?"
+	if strings.Contains(redirectURI, "?") {
+		sep = "&"
+	}
+	redirectURI = redirectURI + sep + "ks=" + url.QueryEscape(state)
+
 	// 构建请求QQ聚合登录平台的URL
 	requestURL := fmt.Sprintf(
 		"%s/connect.php?act=login&appid=%s&appkey=%s&type=%s&redirect_uri=%s",
-		q.Addition.AggregationURL,
+		strings.TrimSuffix(q.Addition.AggregationURL, "/"),
 		url.QueryEscape(q.Addition.AppId),
 		url.QueryEscape(q.Addition.AppKey),
 		url.QueryEscape(q.Addition.LoginType),
@@ -143,7 +152,8 @@ func (q *QQ) OnCallback(ctx *gin.Context, state string, query map[string]string,
 	}
 
 	if err := json.Unmarshal(body, &result); err != nil {
-		return factory.OidcCallback{}, fmt.Errorf("failed to parse callback response: %v, response body: %s", err, string(body))
+		// 不要把聚合平台的原始响应写进错误信息：里面可能包含 access_token。
+		return factory.OidcCallback{}, fmt.Errorf("failed to parse callback response: %v", err)
 	}
 
 	// 检查返回状态码
@@ -153,7 +163,7 @@ func (q *QQ) OnCallback(ctx *gin.Context, state string, query map[string]string,
 
 	// 检查是否返回了用户唯一标识
 	if result.SocialUid == "" {
-		return factory.OidcCallback{}, fmt.Errorf("empty social_uid returned, full response: %s", string(body))
+		return factory.OidcCallback{}, fmt.Errorf("empty social_uid returned")
 	}
 
 	// 返回用户唯一标识

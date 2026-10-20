@@ -1,8 +1,11 @@
 package admin
 
 import (
+	"net/http"
+
 	"github.com/gin-gonic/gin"
 	"github.com/komari-monitor/komari/database/accounts"
+	"github.com/komari-monitor/komari/utils"
 	"github.com/komari-monitor/komari/web/api"
 )
 
@@ -17,7 +20,18 @@ func BindingExternalAccount(c *gin.Context) {
 		api.RespondError(c, 500, "No user found: "+err.Error())
 		return
 	}
-	c.SetCookie("binding_external_account", user.UUID, 3600, "/", "", false, true)
+	// 这个 cookie 只承载"本次授权是绑定"的意图，真正的账号归属记录在服务端
+	// （见 web/api/public/oauth_state.go）。用 SameSite=Strict + 短有效期 +
+	// HttpOnly，避免跨站请求把它带到别人的授权流程里。
+	http.SetCookie(c.Writer, &http.Cookie{
+		Name:     "binding_external_account",
+		Value:    user.UUID,
+		Path:     "/",
+		MaxAge:   120,
+		HttpOnly: true,
+		SameSite: http.SameSiteStrictMode,
+		Secure:   utils.GetScheme(c) == "https",
+	})
 	c.Redirect(302, "/api/oauth")
 }
 
