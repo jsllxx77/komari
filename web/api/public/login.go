@@ -2,6 +2,7 @@ package public
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"math"
@@ -78,13 +79,24 @@ func Login(c *gin.Context) {
 		return
 	}
 	// 2FA
-	user, _ := accounts.GetUserByUUID(uuid)
+	user, err := accounts.GetUserByUUID(uuid)
+	if err != nil {
+		api.RespondError(c, http.StatusInternalServerError, "Failed to load account")
+		return
+	}
 	if user.TwoFactor != "" { // 开启了2FA
 		if data.TwoFa == "" {
 			api.RespondError(c, http.StatusUnauthorized, "2FA code is required")
 			return
 		}
-		if ok, err := accounts.Verify2Fa(uuid, data.TwoFa); err != nil || !ok {
+		ok, verifyErr := accounts.Verify2FaStrict(uuid, data.TwoFa)
+		if errors.Is(verifyErr, accounts.ErrTooMany2FAAttempts) {
+			auditlog.Log(clientIP, uuid, "password login blocked: too many 2FA attempts", "warn")
+			c.Header("Retry-After", "300")
+			api.RespondError(c, http.StatusTooManyRequests, accounts.ErrTooMany2FAAttempts.Error())
+			return
+		}
+		if verifyErr != nil || !ok {
 			recordLoginFailure(clientIP)
 			api.RespondError(c, http.StatusUnauthorized, "Invalid 2FA code")
 			return

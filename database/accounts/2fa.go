@@ -29,30 +29,41 @@ func Generate2Fa() (string, image.Image, error) {
 
 func Enable2Fa(uuid, secret string) error {
 	db := dbcore.GetDBInstance()
-	return db.Model(&models.User{}).Where("uuid = ?", uuid).Update("two_factor", secret).Error
+	if err := db.Model(&models.User{}).Where("uuid = ?", uuid).Update("two_factor", secret).Error; err != nil {
+		return err
+	}
+	Forget2FAState(uuid)
+	return nil
 }
 
-func Verify2Fa(uuid, code string) (bool, error) {
+// Enable2FaIfDisabled 只在用户尚未启用 2FA 时写入密钥，避免覆盖已有密钥。
+// 返回 ErrTwoFactorAlreadyEnabled 表示该账号已经启用了 2FA。
+func Enable2FaIfDisabled(uuid, secret string) error {
 	db := dbcore.GetDBInstance()
-	var user models.User
-	err := db.Where("uuid = ?", uuid).First(&user).Error
-	if err != nil {
-		return false, err
+	result := db.Model(&models.User{}).
+		Where("uuid = ? AND (two_factor IS NULL OR two_factor = '')", uuid).
+		Update("two_factor", secret)
+	if result.Error != nil {
+		return result.Error
 	}
-
-	if user.TwoFactor == "" {
-		return false, nil // 用户未启用2FA
+	if result.RowsAffected == 0 {
+		return ErrTwoFactorAlreadyEnabled
 	}
+	Forget2FAState(uuid)
+	return nil
+}
 
-	valid := totp.Validate(code, user.TwoFactor)
-	if !valid {
-		return false, nil
-	}
-
-	return true, nil
+// Verify2Fa 是历史入口，内部已改为走带限速与防重放的 Verify2FaStrict。
+// 新代码请直接调用 Verify2FaStrict 以区分锁定与重放错误。
+func Verify2Fa(uuid, code string) (bool, error) {
+	return Verify2FaStrict(uuid, code)
 }
 
 func Disable2Fa(uuid string) error {
 	db := dbcore.GetDBInstance()
-	return db.Model(&models.User{}).Where("uuid = ?", uuid).Update("two_factor", "").Error
+	if err := db.Model(&models.User{}).Where("uuid = ?", uuid).Update("two_factor", "").Error; err != nil {
+		return err
+	}
+	Forget2FAState(uuid)
+	return nil
 }
