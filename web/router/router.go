@@ -42,6 +42,9 @@ func registerPublicRoutes(r *gin.Engine) {
 	r.GET("/api/logout", public_api.Logout)
 	r.GET("/api/oauth", public_api.OAuth)
 	r.GET("/api/oauth_callback", public_api.OAuthCallback)
+	// OAuth 登录的第二因子页面（服务端渲染，前端源码不在本仓库）。
+	r.GET("/api/oauth/2fa", public_api.OAuth2FAForm)
+	r.POST("/api/oauth/2fa", public_api.OAuth2FASubmit)
 	// 插件公开页面（visibility=public 的 iframe 页面），无需鉴权。
 	r.GET("/api/plugin/:short/*filepath", public_api.ServePluginFile)
 	// 短期文件预览令牌公开下载入口，供 Office 在线预览等服务端抓取。

@@ -100,6 +100,12 @@ func OAuthCallback(c *gin.Context) {
 		return
 	}
 
+	// 启用 TOTP 的账号必须再走一步验证码，否则第三方账号被控制就等于绕过了 2FA。
+	if user.TwoFactor != "" {
+		startPendingOAuth2FA(c, user.UUID)
+		return
+	}
+
 	// 创建会话
 	session, err := accounts.CreateSession(user.UUID, sessionCookieMaxAge, c.Request.UserAgent(), c.ClientIP(), "oauth")
 	if err != nil {
