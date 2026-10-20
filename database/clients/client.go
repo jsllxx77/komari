@@ -24,12 +24,43 @@ func DeleteClient(clientUuid string) error {
 	return nil
 }
 
+// agentReportableClientColumns 是 SaveClientInfo 允许写入的列。agent 上报的
+// 基础信息最终会落到 UPDATE 语句上，这里再做一层列白名单，确保即使上层漏了
+// 过滤，也写不到 expired_at / traffic_limit / token 这类管理员字段。
+var agentReportableClientColumns = map[string]struct{}{
+	"uuid":               {},
+	"cpu_name":           {},
+	"virtualization":     {},
+	"arch":               {},
+	"cpu_cores":          {},
+	"cpu_physical_cores": {},
+	"os":                 {},
+	"kernel_version":     {},
+	"gpu_name":           {},
+	"ipv4":               {},
+	"ipv6":               {},
+	"region":             {},
+	"mem_total":          {},
+	"swap_total":         {},
+	"disk_total":         {},
+	"version":            {},
+	"updated_at":         {},
+}
+
 func SaveClientInfo(update map[string]interface{}) error {
 	db := dbcore.GetDBInstance()
 	clientUUID, ok := update["uuid"].(string)
 	if !ok || clientUUID == "" {
 		return fmt.Errorf("invalid client UUID")
 	}
+
+	filtered := make(map[string]interface{}, len(update))
+	for key, value := range update {
+		if _, allowed := agentReportableClientColumns[key]; allowed {
+			filtered[key] = value
+		}
+	}
+	update = filtered
 
 	// 确保更新的字段不为空
 	if len(update) == 0 {
