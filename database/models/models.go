@@ -68,7 +68,10 @@ type Session struct {
 	LatestUserAgent string    `json:"latest_user_agent" gorm:"type:text"`
 	LatestIp        string    `json:"latest_ip" gorm:"type:varchar(100)"`
 	Expires         time.Time `json:"expires" gorm:"not null"`
-	CreatedAt       time.Time `json:"created_at"`
+	// MfaVerifiedAt 是最近一次通过 TOTP 校验的时间，用于敏感操作的 step-up
+	// 窗口：登录时带 2FA、或调用 /api/admin/2fa/verify 成功后写入。
+	MfaVerifiedAt *time.Time `json:"mfa_verified_at"`
+	CreatedAt     time.Time  `json:"created_at"`
 }
 
 // Record logs client metrics over time

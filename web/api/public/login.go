@@ -84,6 +84,7 @@ func Login(c *gin.Context) {
 		api.RespondError(c, http.StatusInternalServerError, "Failed to load account")
 		return
 	}
+	twoFAVerified := false
 	if user.TwoFactor != "" { // 开启了2FA
 		if data.TwoFa == "" {
 			api.RespondError(c, http.StatusUnauthorized, "2FA code is required")
@@ -101,12 +102,19 @@ func Login(c *gin.Context) {
 			api.RespondError(c, http.StatusUnauthorized, "Invalid 2FA code")
 			return
 		}
+		twoFAVerified = true
 	}
 	// Create session
 	session, err := accounts.CreateSession(uuid, sessionCookieMaxAge, c.Request.UserAgent(), c.ClientIP(), "password")
 	if err != nil {
 		api.RespondError(c, http.StatusInternalServerError, "Failed to create session: "+err.Error())
 		return
+	}
+	if twoFAVerified {
+		// 登录时刚验过 TOTP：会话在 step-up 窗口内不再要求重复输入验证码。
+		if err := accounts.MarkSessionMFAVerified(session); err != nil {
+			auditlog.Log(clientIP, uuid, "failed to record 2FA step-up state: "+err.Error(), "warn")
+		}
 	}
 	loginAttempts.Reset(clientIP)
 	setSessionCookie(c, session, sessionCookieMaxAge)

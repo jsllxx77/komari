@@ -54,7 +54,7 @@ func dispatchWithSensitive(ctx context.Context, c *gin.Context, meta *rpc.Contex
 		if code == "" && c != nil {
 			code = headerTwoFACode(c)
 		}
-		if err := api.VerifySensitive2FACore(meta.Principal.UserUUID, code, meta.Principal.IsAPIKey); err != nil {
+		if err := api.VerifySensitive2FACore(meta.Principal.UserUUID, meta.SessionToken, code, meta.Principal.IsAPIKey); err != nil {
 			return rpc.ErrorResponse(req.ID, rpc.PermissionDenied, err.Error(), nil)
 		}
 	}

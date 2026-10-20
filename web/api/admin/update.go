@@ -41,7 +41,8 @@ func UpdateUser(c *gin.Context) {
 		api.RespondError(c, 400, "Password must be at least 6 characters long")
 		return
 	}
-	if req.Password != nil {
+	if req.Password != nil || req.Name != nil {
+		// 改密码和改用户名都会影响登录方式，统一要求敏感操作二次验证。
 		c.Set("2fa_code", req.TwoFa)
 		if err := api.VerifySensitive2FA(c); err != nil {
 			api.RespondError(c, 401, err.Error())

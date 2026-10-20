@@ -182,6 +182,9 @@ func OAuth2FASubmit(c *gin.Context) {
 		renderOAuth2FAForm(c, http.StatusInternalServerError, "Failed to create session.")
 		return
 	}
+	if err := accounts.MarkSessionMFAVerified(session); err != nil {
+		auditlog.Log(c.ClientIP(), record.UserUUID, "failed to record 2FA step-up state: "+err.Error(), "warn")
+	}
 	setSessionCookie(c, session, sessionCookieMaxAge)
 	auditlog.Log(c.ClientIP(), record.UserUUID, "logged in (OAuth+2FA)", "login")
 	c.Redirect(http.StatusFound, "/admin/dashboard")

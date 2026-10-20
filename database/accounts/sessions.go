@@ -125,6 +125,35 @@ func DeleteSessionsExcept(uuid, keep string) error {
 	return query.Delete(&models.Session{}).Error
 }
 
+// MarkSessionMFAVerified 记录该会话最近一次通过 TOTP 校验的时间。
+// 敏感操作的 step-up 窗口以此为准，避免每个操作都要求重新输入验证码。
+func MarkSessionMFAVerified(session string) error {
+	if session == "" {
+		return errors.New("session is required")
+	}
+	db := dbcore.GetDBInstance()
+	now := time.Now().UTC()
+	return db.Model(&models.Session{}).
+		Where("session = ?", session).
+		Update("mfa_verified_at", now).Error
+}
+
+// SessionMFAVerifiedAt 返回该会话最近一次通过 TOTP 校验的时间。
+func SessionMFAVerifiedAt(session string) (time.Time, bool, error) {
+	if session == "" {
+		return time.Time{}, false, errors.New("session is required")
+	}
+	db := dbcore.GetDBInstance()
+	var record models.Session
+	if err := db.Select("mfa_verified_at").Where("session = ?", session).First(&record).Error; err != nil {
+		return time.Time{}, false, err
+	}
+	if record.MfaVerifiedAt == nil || record.MfaVerifiedAt.IsZero() {
+		return time.Time{}, false, nil
+	}
+	return record.MfaVerifiedAt.UTC(), true, nil
+}
+
 func UpdateLatest(session, useragent, ip string) error {
 	db := dbcore.GetDBInstance()
 	return db.Model(&models.Session{}).Where("session = ?", session).Updates(map[string]interface{}{

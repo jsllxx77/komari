@@ -2,20 +2,26 @@ package api
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"errors"
 	"io"
 	"net/http"
 	"sync"
+	"time"
 
 	"github.com/gin-gonic/gin"
 	"github.com/komari-monitor/komari/database/accounts"
+	"github.com/komari-monitor/komari/pkg/rpc"
 	logger "github.com/komari-monitor/komari/utils/log"
 )
 
 // max2FACodeBodyPeek 是查找验证码时允许预读的请求体上限。
 // 该中间件在需要敏感操作二次验证的请求上运行，不能无上限地缓冲请求体。
 const max2FACodeBodyPeek = 64 << 10
+
+// mfaStepUpWindow 是"近期已通过 2FA"的有效期：窗口内调用敏感方法不再要求验证码。
+const mfaStepUpWindow = 10 * time.Minute
 
 // allowQueryTwoFactorCode 控制是否仍从 URL 查询参数读取 2FA 验证码。
 // 从 URL 取码会把验证码写进反代日志和 Referer，下个版本会移除；
@@ -32,7 +38,7 @@ func RequireSensitive2FA() gin.HandlerFunc {
 
 		// 只有账号确实启用了 2FA 时才会去提取验证码：提取可能要读请求体，
 		// 未启用 2FA 的账号不应该为此付出代价。
-		err := VerifySensitive2FAFor(uuid, isAPIKey, func() string { return get2FACode(c) })
+		err := VerifySensitive2FAFor(uuid, sessionToken(c), isAPIKey, func() string { return get2FACode(c) })
 		if err != nil {
 			status := http.StatusUnauthorized
 			if errors.Is(err, accounts.ErrTooMany2FAAttempts) {
@@ -49,9 +55,9 @@ func RequireSensitive2FA() gin.HandlerFunc {
 }
 
 // VerifySensitive2FAFor 是传输无关的敏感操作二次验证入口。
-// API Key 豁免；未启用 2FA 的账号放行；其余需要有效的一次性验证码。
-// code 是延迟提取函数：只有账号启用了 2FA 时才会被调用。
-func VerifySensitive2FAFor(userUUID string, isAPIKey bool, code func() string) error {
+// API Key 豁免；未启用 2FA 的账号放行；其余需要"近期通过过 2FA"或本次请求带有效验证码。
+// code 是延迟提取函数：只有需要验证码时才会被调用。
+func VerifySensitive2FAFor(userUUID, sessionToken string, isAPIKey bool, code func() string) error {
 	if isAPIKey {
 		return nil
 	}
@@ -65,6 +71,16 @@ func VerifySensitive2FAFor(userUUID string, isAPIKey bool, code func() string) e
 	if user.TwoFactor == "" {
 		return nil
 	}
+
+	// step-up：登录时已经验过 TOTP 的会话在窗口内不再重复要求验证码。
+	if sessionToken != "" {
+		if verifiedAt, ok, err := accounts.SessionMFAVerifiedAt(sessionToken); err == nil && ok {
+			if time.Since(verifiedAt) < mfaStepUpWindow {
+				return nil
+			}
+		}
+	}
+
 	codeValue := ""
 	if code != nil {
 		codeValue = code()
@@ -79,13 +95,26 @@ func VerifySensitive2FAFor(userUUID string, isAPIKey bool, code func() string) e
 	if !ok {
 		return err2FAInvalid()
 	}
+	// 本次输入有效：把会话在窗口内标记为已通过，后续敏感操作不再要求验证码。
+	if sessionToken != "" {
+		_ = accounts.MarkSessionMFAVerified(sessionToken)
+	}
 	return nil
 }
 
+// sessionToken 读取当前请求的会话令牌（cookie 认证场景）。
+func sessionToken(c *gin.Context) string {
+	session, err := c.Cookie("session_token")
+	if err != nil {
+		return ""
+	}
+	return session
+}
+
 // VerifySensitive2FACore 传输无关的 2FA 校验核心。
-// 输入原始值:userUUID、2FA code、是否为 API Key。
-func VerifySensitive2FACore(userUUID, code string, isAPIKey bool) error {
-	return VerifySensitive2FAFor(userUUID, isAPIKey, func() string { return code })
+// 输入原始值:userUUID、会话令牌、2FA code、是否为 API Key。
+func VerifySensitive2FACore(userUUID, sessionToken, code string, isAPIKey bool) error {
+	return VerifySensitive2FAFor(userUUID, sessionToken, isAPIKey, func() string { return code })
 }
 
 // VerifySensitive2FA gin 适配层:从 gin.Context 提取参数后委托核心校验。
@@ -93,7 +122,7 @@ func VerifySensitive2FA(c *gin.Context) error {
 	_, isAPIKey := c.Get("api_key")
 	uuidRaw, _ := c.Get("uuid")
 	uuid, _ := uuidRaw.(string)
-	return VerifySensitive2FAFor(uuid, isAPIKey, func() string { return get2FACode(c) })
+	return VerifySensitive2FAFor(uuid, sessionToken(c), isAPIKey, func() string { return get2FACode(c) })
 }
 
 // TwoFactorCodeFromRequest 从请求头或请求体读取验证码，不接受查询参数。
@@ -155,6 +184,16 @@ func twoFactorCodeFromBody(c *gin.Context) string {
 		}
 	}
 	return ""
+}
+
+// RequireSensitive2FAFromContext 供 handler 内部对"按内容决定是否敏感"的接口
+// 做二次校验（例如只修改了安全相关配置项的设置保存）。code 为本次请求带来的验证码。
+func RequireSensitive2FAFromContext(ctx context.Context, code string) error {
+	meta := rpc.MetaFromContext(ctx)
+	if meta == nil || meta.Principal == nil {
+		return errors.New("missing caller identity")
+	}
+	return VerifySensitive2FACore(meta.Principal.UserUUID, meta.SessionToken, code, meta.Principal.IsAPIKey)
 }
 
 func err2FARequired() error {

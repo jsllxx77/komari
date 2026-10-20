@@ -19,6 +19,7 @@ import (
 	"github.com/komari-monitor/komari/internal/lifecycle"
 	"github.com/komari-monitor/komari/internal/metricstore"
 	"github.com/komari-monitor/komari/pkg/rpc"
+	"github.com/komari-monitor/komari/web/api"
 )
 
 // admin.misc.go
@@ -54,6 +55,14 @@ func init() {
 		Name:    "admin:editSettings",
 		Summary: "Update settings (partial)",
 		Returns: "null | { restart_required: true, guide_path: string }",
+	})
+	RegisterWithGroupAndMeta("revealSecret", rpc.RoleAdmin, adminRevealSecret, &rpc.MethodMeta{
+		Name:    "admin:revealSecret",
+		Summary: "Reveal a masked secret setting (sensitive, requires 2FA)",
+		Params: []rpc.ParamMeta{
+			{Name: "key", Type: "string", Required: true, Description: "api_key | auto_discovery_key"},
+		},
+		Returns: "{ key: string, value: string }",
 	})
 	RegisterWithGroupAndMeta("clearAllRecords", rpc.RoleAdmin, adminClearAllRecords, &rpc.MethodMeta{
 		Name:    "admin:clearAllRecords",
@@ -109,7 +118,108 @@ func adminGetSettings(_ context.Context, _ *rpc.JsonRpcRequest) (any, *rpc.JsonR
 	if err != nil {
 		return nil, rpc.MakeError(rpc.InternalError, "Failed to get settings: "+err.Error(), nil)
 	}
-	return cst, nil
+	// 密钥类配置只返回打码值：拿到会话 cookie 的攻击者不应能直接读出 api_key。
+	// 需要明文时走 admin:revealSecret（敏感操作）。
+	return maskSecretSettings(cst), nil
+}
+
+// sensitiveSettingKeys 是与认证、授权、注入相关的配置键：修改它们需要敏感操作
+// 二次验证（step-up）。普通展示类设置（站点名、描述等）不受影响，避免每次保存
+// 设置都要求输入验证码。
+var sensitiveSettingKeys = map[string]struct{}{
+	config.ApiKeyKey:                 {},
+	config.AutoDiscoveryKeyKey:       {},
+	config.DisablePasswordLoginKey:   {},
+	config.OAuthEnabledKey:           {},
+	config.OAuthProviderKey:          {},
+	config.CorsOriginCheckEnabledKey: {},
+	config.CorsAllowedOriginsKey:     {},
+	config.WsOriginCheckEnabledKey:   {},
+	config.WsAllowedOriginsKey:       {},
+	config.PrivateSiteKey:            {},
+	config.SSRFProtectionEnabledKey:  {},
+	config.CustomHeadKey:             {},
+	config.CustomBodyKey:             {},
+	config.ScriptDomainKey:           {},
+	config.BaseScriptsURLKey:         {},
+}
+
+// secretSettingKeys 是需要在读取时打码的配置键。
+var secretSettingKeys = map[string]struct{}{
+	config.ApiKeyKey:           {},
+	config.AutoDiscoveryKeyKey: {},
+}
+
+const maskedSecretPlaceholder = "****"
+
+// maskSecretValue 保留后 4 位，其余用星号代替；空值保持为空。
+func maskSecretValue(value string) string {
+	if value == "" {
+		return ""
+	}
+	runes := []rune(value)
+	if len(runes) <= 4 {
+		return maskedSecretPlaceholder
+	}
+	return maskedSecretPlaceholder + string(runes[len(runes)-4:])
+}
+
+func maskSecretSettings(settings map[string]interface{}) map[string]interface{} {
+	out := make(map[string]interface{}, len(settings))
+	for key, value := range settings {
+		out[key] = value
+	}
+	for key := range secretSettingKeys {
+		if raw, ok := out[key].(string); ok {
+			out[key] = maskSecretValue(raw)
+		}
+	}
+	return out
+}
+
+// stripMaskedSecrets 丢弃仍然是打码值的密钥字段：前端把打码值原样提交回来时，
+// 不应把真正的密钥覆盖成 "****1234"。
+func stripMaskedSecrets(cfg map[string]interface{}) {
+	for key := range secretSettingKeys {
+		value, ok := cfg[key].(string)
+		if !ok {
+			continue
+		}
+		if value == "" || strings.HasPrefix(value, maskedSecretPlaceholder) {
+			delete(cfg, key)
+		}
+	}
+}
+
+// sensitiveSettingsTouched 判断本次设置变更是否涉及安全相关键。
+func sensitiveSettingsTouched(cfg map[string]interface{}) bool {
+	for key := range cfg {
+		if _, ok := sensitiveSettingKeys[key]; ok {
+			return true
+		}
+	}
+	return false
+}
+
+// adminRevealSecret 返回密钥类配置的明文。方法已标记为敏感操作：需要 2FA
+// 或 10 分钟内的 step-up 窗口。每次读取都写审计日志。
+func adminRevealSecret(ctx context.Context, req *rpc.JsonRpcRequest) (any, *rpc.JsonRpcError) {
+	var params struct {
+		Key string `json:"key"`
+	}
+	if err := req.BindParams(&params); err != nil {
+		return nil, rpc.MakeError(rpc.InvalidParams, "Invalid request body: "+err.Error(), nil)
+	}
+	if _, ok := secretSettingKeys[params.Key]; !ok {
+		return nil, rpc.MakeError(rpc.InvalidParams, "unknown secret key", nil)
+	}
+	value, err := config.GetAs[string](params.Key, "")
+	if err != nil {
+		return nil, rpc.MakeError(rpc.InternalError, "Failed to read setting: "+err.Error(), nil)
+	}
+	actor, ip := auditActor(ctx)
+	auditlog.Log(ip, actor, "revealed secret setting: "+params.Key, "warn")
+	return map[string]any{"key": params.Key, "value": value}, nil
 }
 
 // metricStoreConfigKeys 是与 metrics 独立数据库及 rollup 策略相关、需要
@@ -142,6 +252,19 @@ func adminEditSettings(ctx context.Context, req *rpc.JsonRpcRequest) (any, *rpc.
 	if err := req.BindParams(&cfg); err != nil {
 		return nil, rpc.MakeError(rpc.InvalidParams, "Invalid or missing request body: "+err.Error(), nil)
 	}
+
+	// 打码后的密钥原样回传时不能覆盖真实值；2fa_code 只是校验用的临时字段。
+	stripMaskedSecrets(cfg)
+	twoFACode, _ := cfg["2fa_code"].(string)
+	delete(cfg, "2fa_code")
+
+	// 涉及认证/授权/注入的配置项需要敏感操作二次验证（或 10 分钟内的 step-up 窗口）。
+	if sensitiveSettingsTouched(cfg) {
+		if err := api.RequireSensitive2FAFromContext(ctx, twoFACode); err != nil {
+			return nil, rpc.MakeError(rpc.PermissionDenied, err.Error(), nil)
+		}
+	}
+
 	removeRetiredLowResourceMode(cfg)
 	if err := validateMetricRollupSettingChanges(cfg); err != nil {
 		return nil, rpc.MakeError(rpc.InvalidParams, err.Error(), nil)

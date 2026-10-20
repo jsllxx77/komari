@@ -111,3 +111,40 @@ func Disable2FA(c *gin.Context) {
 	auditlog.Log(c.ClientIP(), uuid, "disabled 2FA", "security")
 	api.RespondSuccess(c, "")
 }
+
+// Verify2FA 为当前会话开启一段 step-up 窗口：通过后 10 分钟内调用敏感管理
+// 接口不再要求验证码，避免每个操作都弹一次。
+func Verify2FA(c *gin.Context) {
+	uuid := c.GetString("uuid")
+	if uuid == "" {
+		api.RespondError(c, http.StatusUnauthorized, "Unauthorized.")
+		return
+	}
+	code := api.TwoFactorCodeFromRequest(c)
+	if code == "" {
+		api.RespondError(c, http.StatusBadRequest, "2FA code is required")
+		return
+	}
+	ok, err := accounts.Verify2FaStrict(uuid, code)
+	if errors.Is(err, accounts.ErrTooMany2FAAttempts) {
+		api.RespondError(c, http.StatusTooManyRequests, err.Error())
+		return
+	}
+	if err != nil {
+		api.RespondError(c, http.StatusInternalServerError, "Failed to verify 2FA code: "+err.Error())
+		return
+	}
+	if !ok {
+		auditlog.Log(c.ClientIP(), uuid, "sensitive operation 2FA failed", "warn")
+		api.RespondError(c, http.StatusUnauthorized, "Invalid 2FA code")
+		return
+	}
+	session, _ := c.Cookie("session_token")
+	if session != "" {
+		if err := accounts.MarkSessionMFAVerified(session); err != nil {
+			api.RespondError(c, http.StatusInternalServerError, "Failed to update session: "+err.Error())
+			return
+		}
+	}
+	api.RespondSuccess(c, "2FA verified")
+}
