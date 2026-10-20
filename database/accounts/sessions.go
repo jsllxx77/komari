@@ -111,6 +111,20 @@ func DeleteAllSessions() error {
 	return nil
 }
 
+// DeleteSessionsExcept 删除指定用户除 keep 之外的所有会话。
+// 用于启用 2FA、修改密码等场景撤销可能已被他人持有的旧会话。
+func DeleteSessionsExcept(uuid, keep string) error {
+	if uuid == "" {
+		return errors.New("uuid is required")
+	}
+	db := dbcore.GetDBInstance()
+	query := db.Where("uuid = ?", uuid)
+	if keep != "" {
+		query = query.Where("session <> ?", keep)
+	}
+	return query.Delete(&models.Session{}).Error
+}
+
 func UpdateLatest(session, useragent, ip string) error {
 	db := dbcore.GetDBInstance()
 	return db.Model(&models.Session{}).Where("session = ?", session).Updates(map[string]interface{}{

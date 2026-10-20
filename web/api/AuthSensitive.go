@@ -96,6 +96,18 @@ func VerifySensitive2FA(c *gin.Context) error {
 	return VerifySensitive2FAFor(uuid, isAPIKey, func() string { return get2FACode(c) })
 }
 
+// TwoFactorCodeFromRequest 从请求头或请求体读取验证码，不接受查询参数。
+// 供不经过敏感操作中间件的接口（例如启用 2FA）使用。
+func TwoFactorCodeFromRequest(c *gin.Context) string {
+	if code := c.GetHeader("X-2FA-Code"); code != "" {
+		return code
+	}
+	if code := c.GetHeader("X-Two-Factor-Code"); code != "" {
+		return code
+	}
+	return twoFactorCodeFromBody(c)
+}
+
 func get2FACode(c *gin.Context) string {
 	if code, ok := c.Get("2fa_code"); ok {
 		if codeString, ok := code.(string); ok && codeString != "" {
@@ -118,10 +130,15 @@ func get2FACode(c *gin.Context) string {
 			}
 		}
 	}
+	return twoFactorCodeFromBody(c)
+}
+
+// twoFactorCodeFromBody 从 JSON 请求体中读取验证码。
+// 预读有上限的前缀，再把未读部分拼回去，保证下游 handler 仍能读到完整请求体。
+func twoFactorCodeFromBody(c *gin.Context) string {
 	if c.Request.Body == nil || c.Request.Method == http.MethodGet {
 		return ""
 	}
-	// 预读有上限的前缀，再把未读部分拼回去，保证下游 handler 仍能读到完整请求体。
 	original := c.Request.Body
 	prefix, err := io.ReadAll(io.LimitReader(original, max2FACodeBodyPeek+1))
 	c.Request.Body = prefixedBody{Reader: io.MultiReader(bytes.NewReader(prefix), original), Closer: original}

@@ -1,54 +1,113 @@
 package admin
 
 import (
+	"errors"
 	"image/png"
+	"net/http"
+	"time"
 
 	"github.com/gin-gonic/gin"
 	"github.com/komari-monitor/komari/database/accounts"
+	"github.com/komari-monitor/komari/database/auditlog"
 	"github.com/komari-monitor/komari/web/api"
-	"github.com/pquerna/otp/totp"
+	"github.com/patrickmn/go-cache"
 )
 
+// pending2FASecrets 保存"已生成但尚未确认"的 2FA 密钥，键为账号 UUID。
+// 密钥只存在服务端：以前它放在客户端 cookie 里，拿到会话的人可以自己挑一个
+// 密钥、算出对应的 TOTP 覆盖掉已有的 2FA，而户主的改密也不会撤销它。
+var pending2FASecrets = cache.New(10*time.Minute, 20*time.Minute)
+
 func Generate2FA(c *gin.Context) {
-	secret, img, err := accounts.Generate2Fa()
-	if err != nil {
-		api.RespondError(c, 500, "Failed to generate 2FA: "+err.Error())
+	uuid := c.GetString("uuid")
+	if uuid == "" {
+		api.RespondError(c, http.StatusUnauthorized, "Unauthorized.")
 		return
 	}
-	c.SetCookie("2fa_secret", secret, 1800, "/", "", false, true)
+	user, err := accounts.GetUserByUUID(uuid)
+	if err != nil {
+		api.RespondError(c, http.StatusInternalServerError, "Failed to load account: "+err.Error())
+		return
+	}
+	if user.TwoFactor != "" {
+		// 更换密钥必须先停用：停用需要当前 TOTP，这条路径不能被绕过。
+		api.RespondError(c, http.StatusConflict, "2FA is already enabled; disable it before generating a new secret")
+		return
+	}
+	secret, img, err := accounts.Generate2Fa()
+	if err != nil {
+		api.RespondError(c, http.StatusInternalServerError, "Failed to generate 2FA: "+err.Error())
+		return
+	}
+	pending2FASecrets.Set(uuid, secret, cache.DefaultExpiration)
+	c.Header("Cache-Control", "no-store")
 	c.Header("Content-Type", "image/png")
-	c.Writer.WriteHeader(200)
-	png.Encode(c.Writer, img)
+	c.Writer.WriteHeader(http.StatusOK)
+	_ = png.Encode(c.Writer, img)
 }
 
 func Enable2FA(c *gin.Context) {
-	uuid, _ := c.Get("uuid")
-	secret, _ := c.Cookie("2fa_secret")
-	code := c.Query("code")
-	if secret == "" || uuid == nil || code == "" {
-		api.RespondError(c, 400, "2FA secret or code not provided")
+	uuid := c.GetString("uuid")
+	if uuid == "" {
+		api.RespondError(c, http.StatusUnauthorized, "Unauthorized.")
 		return
 	}
-	if !totp.Validate(code, secret) {
-		api.RespondError(c, 400, "Invalid 2FA code")
+	value, ok := pending2FASecrets.Get(uuid)
+	if !ok {
+		api.RespondError(c, http.StatusBadRequest, "2FA setup expired, generate a new secret first")
 		return
 	}
-	err := accounts.Enable2Fa(uuid.(string), secret)
-	if err != nil {
-		api.RespondError(c, 500, "Failed to enable 2FA: "+err.Error())
+	secret, _ := value.(string)
+	code := api.TwoFactorCodeFromRequest(c)
+	if code == "" {
+		api.RespondError(c, http.StatusBadRequest, "2FA code is required")
 		return
 	}
-	c.SetCookie("2fa_secret", "", -1, "/", "", false, true)
 
+	valid, err := accounts.Validate2FACodeForSecret(uuid, secret, code)
+	if errors.Is(err, accounts.ErrTooMany2FAAttempts) {
+		api.RespondError(c, http.StatusTooManyRequests, err.Error())
+		return
+	}
+	if err != nil {
+		api.RespondError(c, http.StatusInternalServerError, "Failed to verify 2FA code: "+err.Error())
+		return
+	}
+	if !valid {
+		api.RespondError(c, http.StatusBadRequest, "Invalid 2FA code")
+		return
+	}
+
+	if err := accounts.Enable2FaIfDisabled(uuid, secret); err != nil {
+		if errors.Is(err, accounts.ErrTwoFactorAlreadyEnabled) {
+			api.RespondError(c, http.StatusConflict, "2FA is already enabled")
+			return
+		}
+		api.RespondError(c, http.StatusInternalServerError, "Failed to enable 2FA: "+err.Error())
+		return
+	}
+	pending2FASecrets.Delete(uuid)
+
+	// 启用 2FA 说明账号可能已被他人使用过，撤销除当前会话外的其他会话。
+	if session, err := c.Cookie("session_token"); err == nil && session != "" {
+		if err := accounts.DeleteSessionsExcept(uuid, session); err != nil {
+			auditlog.Log(c.ClientIP(), uuid, "failed to revoke other sessions after enabling 2FA: "+err.Error(), "warn")
+		}
+	}
+	auditlog.Log(c.ClientIP(), uuid, "enabled 2FA", "security")
 	api.RespondSuccess(c, "2FA enabled successfully")
 }
 
 func Disable2FA(c *gin.Context) {
-	uuid, _ := c.Get("uuid")
-	err := accounts.Disable2Fa(uuid.(string))
-	if err != nil {
-		api.RespondError(c, 500, "Failed to disable 2FA: "+err.Error())
+	uuid := c.GetString("uuid")
+	if uuid == "" {
+		api.RespondError(c, http.StatusUnauthorized, "Unauthorized.")
 		return
 	}
+	if err := accounts.Disable2Fa(uuid); err != nil {
+		api.RespondError(c, http.StatusInternalServerError, "Failed to disable 2FA: "+err.Error())
+		return
+	}
+	auditlog.Log(c.ClientIP(), uuid, "disabled 2FA", "security")
 	api.RespondSuccess(c, "")
 }
