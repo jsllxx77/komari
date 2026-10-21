@@ -84,15 +84,24 @@ func TestLogin(t *testing.T) {
 
 			// 断言响应体
 			if tt.expectedStatus == http.StatusOK {
-				// 对于成功的情况，我们只检查响应结构，不检查具体的 session token
+				// 登录成功只通过 Set-Cookie 下发会话，响应体不再包含明文 token。
 				assert.Equal(t, "success", response["status"])
 				assert.Equal(t, "", response["message"])
-				data, ok := response["data"].(map[string]interface{})
-				assert.True(t, ok)
-				setCookie, ok := data["set-cookie"].(map[string]interface{})
-				assert.True(t, ok)
-				assert.NotEmpty(t, setCookie["session_token"])
+				_, hasData := response["data"]
+				assert.False(t, hasData, "success response should not carry data")
+				assert.NotContains(t, w.Body.String(), "session_token")
+				assert.NotContains(t, w.Body.String(), "set-cookie")
 				assert.Contains(t, strings.Join(w.Header().Values("Set-Cookie"), "\n"), "session_token=")
+				var sessionCookie *http.Cookie
+				for _, cookie := range w.Result().Cookies() {
+					if cookie.Name == "session_token" {
+						sessionCookie = cookie
+					}
+				}
+				if assert.NotNil(t, sessionCookie, "Set-Cookie must contain session_token") {
+					assert.NotEmpty(t, sessionCookie.Value)
+					assert.True(t, sessionCookie.HttpOnly)
+				}
 			} else {
 				assert.Equal(t, tt.expectedBody, response)
 			}
