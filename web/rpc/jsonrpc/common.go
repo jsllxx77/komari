@@ -456,10 +456,11 @@ func getMe(ctx context.Context, _ *rpc.JsonRpcRequest) (any, *rpc.JsonRpcError) 
 		resp.SSOId = "client"
 		resp.SSOType = "client"
 		resp.Username = "client"
-		resp.UUID = meta.ClientToken
-		client, err := clients.GetClientUUIDByToken(meta.ClientToken)
-		if err != nil {
-			resp.UUID = client
+		// 由 token 反查客户端 UUID；查询失败时保持 UUID 为空，
+		// 不把调用者提交的 token 当作 UUID 返回。
+		clientUUID, err := clients.GetClientUUIDByToken(meta.ClientToken)
+		if err == nil {
+			resp.UUID = clientUUID
 		}
 		return resp, nil
 	default:
