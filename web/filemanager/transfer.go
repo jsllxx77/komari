@@ -128,8 +128,35 @@ type persistedUploadSession struct {
 	ExpiresAt  time.Time `json:"expires_at"`
 }
 
-func uploadSessionPath(id string) string {
-	return filepath.Join("data", ".uploading", ".komari-upload-"+id+".json")
+// uploadSessionDir holds the persisted upload session records. It is a
+// variable so tests can redirect it to a temporary directory.
+var uploadSessionDir = filepath.Join("data", ".uploading")
+
+// validateUploadSessionID rejects an upload_id that is not a UUID. Session ids
+// are minted with uuid.NewString() and echoed back by the client through
+// ?upload_id= / X-Komari-Upload-ID, so any other value is untrusted input that
+// must never be interpolated into a filesystem path (a value such as
+// "../../../theme/default/komari-theme" would otherwise address and delete a
+// file outside the upload session directory).
+func validateUploadSessionID(id string) error {
+	if _, err := uuid.Parse(id); err != nil {
+		return errors.New("invalid upload_id")
+	}
+	return nil
+}
+
+func uploadSessionPath(id string) (string, error) {
+	if err := validateUploadSessionID(id); err != nil {
+		return "", err
+	}
+	path := filepath.Join(uploadSessionDir, ".komari-upload-"+id+".json")
+	// Second layer of defence: even if the id validation above is ever
+	// relaxed, the joined path must stay inside uploadSessionDir.
+	rel, err := filepath.Rel(uploadSessionDir, path)
+	if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(os.PathSeparator)) || filepath.IsAbs(rel) {
+		return "", errors.New("invalid upload_id")
+	}
+	return path, nil
 }
 
 func Upload(c *gin.Context) {
@@ -222,6 +249,17 @@ func uploadRemoteChunkStream(c *gin.Context, clientUUID string) {
 	if uploadID == "" {
 		uploadID = strings.TrimSpace(c.GetHeader("X-Komari-Upload-ID"))
 	}
+	if uploadID == "" {
+		logger.Warnf("file-transfer", "upload chunk missing upload_id client=%s", clientUUID)
+		api.RespondError(c, http.StatusBadRequest, "upload_id is required")
+		return
+	}
+	// Reject a malformed upload_id before it can be used to build a session
+	// file path (see uploadSessionPath).
+	if err := validateUploadSessionID(uploadID); err != nil {
+		respondInvalidUploadID(c, "upload chunk", clientUUID, uploadID)
+		return
+	}
 	indexValue := strings.TrimSpace(c.Query("chunk_index"))
 	if indexValue == "" {
 		indexValue = strings.TrimSpace(c.GetHeader("X-Komari-Chunk-Index"))
@@ -230,11 +268,6 @@ func uploadRemoteChunkStream(c *gin.Context, clientUUID string) {
 	if err != nil {
 		logger.Warnf("file-transfer", "upload chunk has invalid chunk_index client=%s upload_id=%q value=%q: %v", clientUUID, uploadID, indexValue, err)
 		api.RespondError(c, http.StatusBadRequest, "chunk_index must be an integer")
-		return
-	}
-	if uploadID == "" {
-		logger.Warnf("file-transfer", "upload chunk missing upload_id client=%s", clientUUID)
-		api.RespondError(c, http.StatusBadRequest, "upload_id is required")
 		return
 	}
 
@@ -389,6 +422,10 @@ func mergeRemoteUpload(c *gin.Context, clientUUID string) {
 		api.RespondError(c, http.StatusBadRequest, fmt.Sprintf("invalid request: %v", err))
 		return
 	}
+	if err := validateUploadSessionID(request.UploadID); err != nil {
+		respondInvalidUploadID(c, "upload merge", clientUUID, request.UploadID)
+		return
+	}
 	session, _, err := acquireUploadSession(request.UploadID, clientUUID, "", 0, 0)
 	if err != nil {
 		respondTransferError(c, err)
@@ -455,6 +492,10 @@ func cancelUpload(c *gin.Context, clientUUID string) {
 	}
 	if clientUUID == "" || id == "" {
 		api.RespondError(c, http.StatusBadRequest, "uuid and upload_id are required")
+		return
+	}
+	if err := validateUploadSessionID(id); err != nil {
+		respondInvalidUploadID(c, "upload cancel", clientUUID, id)
 		return
 	}
 	session, _, err := acquireUploadSession(id, clientUUID, "", 0, 0)
@@ -862,7 +903,11 @@ func loadUploadSession(id string) (*persistedUploadSession, error) {
 	if id == "" {
 		return nil, ErrUnknownToken
 	}
-	data, err := os.ReadFile(uploadSessionPath(id))
+	path, err := uploadSessionPath(id)
+	if err != nil {
+		return nil, ErrUnknownToken
+	}
+	data, err := os.ReadFile(path)
 	if err != nil {
 		return nil, ErrUnknownToken
 	}
@@ -944,7 +989,10 @@ func saveUploadSession(session *uploadSession) {
 	if err != nil {
 		return
 	}
-	path := uploadSessionPath(session.ID)
+	path, err := uploadSessionPath(session.ID)
+	if err != nil {
+		return
+	}
 	if err := os.WriteFile(path, data, 0600); err != nil {
 		return
 	}
@@ -955,7 +1003,11 @@ func removeUploadSessionState(id string) {
 	if id == "" {
 		return
 	}
-	_ = os.Remove(uploadSessionPath(id))
+	path, err := uploadSessionPath(id)
+	if err != nil {
+		return
+	}
+	_ = os.Remove(path)
 }
 
 func startUploadCleanup() {
@@ -979,7 +1031,7 @@ func startUploadCleanup() {
 }
 
 func ensureUploadSessionDirectory() {
-	_ = os.MkdirAll(filepath.Dir(uploadSessionPath("x")), 0755)
+	_ = os.MkdirAll(uploadSessionDir, 0755)
 }
 
 func restoreUploadSession(id string) *uploadSession {
@@ -1023,6 +1075,13 @@ func parseInt64Query(c *gin.Context, name string) (int64, error) {
 		return 0, fmt.Errorf("%s is required", name)
 	}
 	return strconv.ParseInt(value, 10, 64)
+}
+
+// respondInvalidUploadID answers 400 for an upload_id that failed validation.
+// The value is logged with %q but never echoed back to the client.
+func respondInvalidUploadID(c *gin.Context, stage, clientUUID, uploadID string) {
+	logger.Warnf("file-transfer", "%s rejected invalid upload_id client=%s upload_id=%q", stage, clientUUID, uploadID)
+	api.RespondError(c, http.StatusBadRequest, "upload_id is invalid")
 }
 
 func respondTransferError(c *gin.Context, err error) {

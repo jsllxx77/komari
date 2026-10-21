@@ -4,11 +4,15 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/gin-gonic/gin"
+	"github.com/google/uuid"
 )
 
 func TestUploadSessionLimitAndRelease(t *testing.T) {
@@ -224,4 +228,110 @@ func TestSetDownloadSecurityHeaders(t *testing.T) {
 			t.Errorf("%s: sandboxed = %v, want %v", tt.contentType, gotSandbox, tt.sandboxed)
 		}
 	}
+}
+
+// traversalUploadID mirrors the exploitation payload: joined into the session
+// file name it cleans to data/theme/default/komari-theme.json, one level above
+// the upload session directory.
+const traversalUploadID = "../../../theme/default/komari-theme"
+
+func TestUploadSessionPathRejectsInvalidIDs(t *testing.T) {
+	badIDs := []string{
+		traversalUploadID,
+		"..",
+		"../komari-theme",
+		"a/b",
+		`a\b`,
+		`..\..\theme\default\komari-theme`,
+		"",
+		"not-a-uuid",
+		"../../x?y=1",
+	}
+	for _, id := range badIDs {
+		if err := validateUploadSessionID(id); err == nil {
+			t.Fatalf("validateUploadSessionID(%q) accepted a non-UUID id", id)
+		}
+		if path, err := uploadSessionPath(id); err == nil {
+			t.Fatalf("uploadSessionPath(%q) = %q, want an error", id, path)
+		}
+	}
+
+	id := uuid.NewString()
+	path, err := uploadSessionPath(id)
+	if err != nil {
+		t.Fatalf("uploadSessionPath(valid uuid) failed: %v", err)
+	}
+	want := filepath.Join(uploadSessionDir, ".komari-upload-"+id+".json")
+	if path != want {
+		t.Fatalf("uploadSessionPath(%q) = %q, want %q", id, path, want)
+	}
+}
+
+func TestUploadSessionTraversalDoesNotRemoveTargetFile(t *testing.T) {
+	resetUploadSessionsForTest()
+	t.Cleanup(resetUploadSessionsForTest)
+
+	root := t.TempDir()
+	victim := filepath.Join(root, "data", "theme", "default", "komari-theme.json")
+	if err := os.MkdirAll(filepath.Dir(victim), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(victim, []byte(`{"name":"default"}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	// Run inside the temporary root so the relative session path used in
+	// production is exercised without writing into the repository.
+	t.Chdir(root)
+
+	if _, err := loadUploadSession(traversalUploadID); err == nil {
+		t.Fatal("loadUploadSession accepted a traversal upload_id")
+	}
+	removeUploadSessionState(traversalUploadID)
+	if _, _, err := acquireUploadSession(traversalUploadID, "client", "", 0, 0); err == nil {
+		t.Fatal("acquireUploadSession accepted a traversal upload_id")
+	}
+
+	if _, err := os.Stat(victim); err != nil {
+		t.Fatalf("target file was removed by a traversal upload_id: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(root, "data", ".uploading")); !os.IsNotExist(err) {
+		t.Fatalf("unexpected session directory state: %v", err)
+	}
+}
+
+func TestUploadEntryPointsRejectTraversalUploadID(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	query := url.Values{"upload_id": {traversalUploadID}, "chunk_index": {"0"}}.Encode()
+	body := `{"upload_id":"` + traversalUploadID + `"}`
+
+	newContext := func(method, target, payload string) (*gin.Context, *httptest.ResponseRecorder) {
+		recorder := httptest.NewRecorder()
+		context, _ := gin.CreateTestContext(recorder)
+		request := httptest.NewRequest(method, target, strings.NewReader(payload))
+		request.Header.Set("Content-Type", "application/json")
+		context.Request = request
+		return context, recorder
+	}
+
+	t.Run("chunk", func(t *testing.T) {
+		context, recorder := newContext(http.MethodPost, "/file?"+query, "")
+		uploadRemoteChunkStream(context, "client")
+		if recorder.Code != http.StatusBadRequest {
+			t.Fatalf("status = %d, want %d", recorder.Code, http.StatusBadRequest)
+		}
+	})
+	t.Run("merge", func(t *testing.T) {
+		context, recorder := newContext(http.MethodPost, "/file", body)
+		mergeRemoteUpload(context, "client")
+		if recorder.Code != http.StatusBadRequest {
+			t.Fatalf("status = %d, want %d", recorder.Code, http.StatusBadRequest)
+		}
+	})
+	t.Run("cancel", func(t *testing.T) {
+		context, recorder := newContext(http.MethodPost, "/file?"+query, "")
+		cancelUpload(context, "client")
+		if recorder.Code != http.StatusBadRequest {
+			t.Fatalf("status = %d, want %d", recorder.Code, http.StatusBadRequest)
+		}
+	})
 }
