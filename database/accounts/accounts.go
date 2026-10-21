@@ -34,7 +34,7 @@ func CheckPassword(username, passwd string) (uuid string, success bool) {
 	result := db.Where("username = ?", username).First(&user)
 	if result.Error != nil {
 		// 用户不存在时同样执行一次 bcrypt 比较，避免通过响应耗时探测用户名。
-		_ = bcrypt.CompareHashAndPassword(dummyPasswordHash(), prehashPasswd(passwd))
+		verifyDummyBcrypt(prehashPasswd(passwd))
 		return "", false
 	}
 	ok, needsUpgrade := verifyPasswd(user.Passwd, passwd)
@@ -98,7 +98,12 @@ func verifyPasswd(stored, passwd string) (ok bool, needsUpgrade bool) {
 		cost, err := bcrypt.Cost([]byte(stored))
 		return true, err != nil || cost < bcrypt.DefaultCost
 	}
-	if subtle.ConstantTimeCompare([]byte(legacyHashPasswd(passwd)), []byte(stored)) != 1 {
+	// 旧版本哈希只做一次 SHA-256，耗时远低于 bcrypt，可被用来判断用户名是否
+	// 存在（只影响尚未登录升级的旧账号）。这里无论是否匹配都补一次固定成本的
+	// dummy bcrypt，使旧哈希账号与 bcrypt 账号、不存在用户三者的校验耗时一致。
+	matched := subtle.ConstantTimeCompare([]byte(legacyHashPasswd(passwd)), []byte(stored)) == 1
+	verifyDummyBcrypt(prehashPasswd(passwd))
+	if !matched {
 		return false, false
 	}
 	return true, true
@@ -123,6 +128,13 @@ var (
 	dummyHashOnce sync.Once
 	dummyHash     []byte
 )
+
+// verifyDummyBcrypt 用固定的 dummy 哈希执行一次 bcrypt 比较，保证调用方付出
+// 一次 bcrypt 成本。抽取为包级变量，便于测试替换后断言旧哈希路径确实调用；
+// 结果被丢弃，不改变对外行为。
+var verifyDummyBcrypt = func(input []byte) {
+	_ = bcrypt.CompareHashAndPassword(dummyPasswordHash(), input)
+}
 
 // dummyPasswordHash 返回一个随机密码的 bcrypt 哈希，用于让不存在的用户名也消耗同等的校验时间。
 func dummyPasswordHash() []byte {
