@@ -146,6 +146,42 @@ jobs:
           gh release upload ${{ github.event.release.tag_name }} $BINARY_NAME --repo ${{ github.repository }}
         shell: bash
 
+  attach-checksums:
+    needs: build-and-attach-binaries
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+      - name: Download all built binaries
+        uses: actions/download-artifact@v4
+        with:
+          pattern: komari-*
+          path: dist
+          merge-multiple: true
+
+      - name: Generate SHA256SUMS
+        working-directory: dist
+        run: |
+          # 逐个二进制计算 SHA256，输出标准的 "<hash>  <filename>" 行。
+          sha256sum komari-* > SHA256SUMS
+          cat SHA256SUMS
+
+      - name: Upload SHA256SUMS to release
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh release upload ${{ github.event.release.tag_name }} dist/SHA256SUMS \
+            --repo ${{ github.repository }} --clobber
+        shell: bash
+
+      # 可选：如已配置 sigstore/cosign，可在此对 SHA256SUMS 做无密钥（keyless）签名：
+      # - uses: sigstore/cosign-installer@v3
+      # - run: cosign sign-blob --yes dist/SHA256SUMS --bundle dist/SHA256SUMS.sigstore
+      #   env:
+      #     COSIGN_EXPERIMENTAL: "1"
+      # 安装脚本目前只做 SHA256SUMS 校验，签名校验需另行配套实现。
+
   build-and-push-docker:
     needs: build-and-attach-binaries
     runs-on: ubuntu-latest

@@ -69,6 +69,8 @@ LANGUAGE="zh"
 # 非交互输出只绘制一次横幅，交互终端则在每个步骤前刷新屏幕。
 SCREEN_DRAWN=0
 PROGRESS_STEPS=()
+# 是否跳过下载二进制的 SHA256SUMS 完整性校验。默认关闭（即默认校验）。
+INSECURE_SKIP_VERIFY=0
 
 # ==========================================================
 # 本地化文案
@@ -509,6 +511,42 @@ msg() {
         invalid_option)
             en_text='Invalid option.'
             zh_text='无效选项。'
+            ;;
+        title_warning)
+            en_text='Warning'
+            zh_text='警告'
+            ;;
+        checksums_downloading)
+            en_text='Downloading checksums (SHA256SUMS)...'
+            zh_text='正在下载校验文件（SHA256SUMS）...'
+            ;;
+        checksums_verified)
+            en_text='Checksum verification passed.'
+            zh_text='校验通过。'
+            ;;
+        checksums_missing_warn)
+            en_text='Warning: this release does not provide SHA256SUMS. Skipping integrity verification (legacy release).'
+            zh_text='警告：该版本未提供 SHA256SUMS，已跳过完整性校验（老版本发布）。'
+            ;;
+        checksums_download_failed)
+            en_text='Failed to download SHA256SUMS. Aborting to avoid installing an unverified binary.'
+            zh_text='下载校验文件 SHA256SUMS 失败，已中止以避免安装未经校验的二进制。'
+            ;;
+        checksums_asset_missing)
+            en_text='SHA256SUMS does not contain an entry for %s. Aborting installation.'
+            zh_text='SHA256SUMS 中没有 %s 的校验记录，已中止安装。'
+            ;;
+        checksums_verify_failed)
+            en_text='Checksum verification failed. The binary may be corrupted or tampered with. Aborting installation.'
+            zh_text='校验失败，二进制文件可能已损坏或被篡改，已中止安装。'
+            ;;
+        checksums_skip_warn)
+            en_text='Warning: --insecure-skip-verify is set. Skipping integrity verification.'
+            zh_text='警告：已启用 --insecure-skip-verify，跳过完整性校验。'
+            ;;
+        unknown_option)
+            en_text='Unknown option: %s'
+            zh_text='未知参数：%s'
             ;;
     esac
 
@@ -1017,6 +1055,121 @@ download_file() {
     return "$download_status"
 }
 
+# 从二进制下载地址推导出同目录的 SHA256SUMS 地址。
+get_checksums_url() {
+    local download_url="$1"
+    printf '%s/SHA256SUMS\n' "${download_url%/*}"
+}
+
+# 下载 SHA256SUMS 到指定文件。
+# 返回 0：下载成功；2：远端不存在（HTTP 404，视为未提供校验文件的老版本通道）；1：其它错误。
+download_checksums() {
+    local url="$1"
+    local target="$2"
+    local http_code
+
+    # 这里不使用 -f，便于区分 404（老版本没有校验文件）与真正的网络错误。
+    http_code=$(curl -sSL --retry 2 --connect-timeout 30 -o "$target" -w '%{http_code}' "$url" 2>/dev/null)
+    case "$http_code" in
+        200)
+            if [ -s "$target" ]; then
+                return 0
+            fi
+            return 1
+            ;;
+        404)
+            return 2
+            ;;
+        *)
+            return 1
+            ;;
+    esac
+}
+
+# 在下载目录内按资产名校验 SHA256SUMS。
+# 返回 0：校验通过；2：清单中没有该资产；1：校验不匹配。
+verify_binary_checksum() {
+    local work_dir="$1"
+    local asset_name="$2"
+
+    if ! awk -v name="$asset_name" '
+        { file = $2; sub(/^\*/, "", file); if (file == name) found = 1 }
+        END { exit(found ? 0 : 1) }
+    ' "$work_dir/SHA256SUMS"; then
+        return 2
+    fi
+
+    # --ignore-missing 允许清单中列出其它平台的资产而只校验已下载的本平台二进制。
+    ( cd "$work_dir" && sha256sum -c --ignore-missing SHA256SUMS >/dev/null 2>&1 )
+}
+
+# 下载二进制并在安装前完成完整性校验。
+# 用法：download_and_verify_binary <download_url> <dest_path> <label>
+# 二进制先下载到安装目录下的临时目录，只有校验通过后才会被移动到 dest_path；
+# 任何一步失败都不会留下半成品，也不会覆盖 dest_path 上已有的二进制。
+download_and_verify_binary() {
+    local download_url="$1"
+    local dest_path="$2"
+    local label="$3"
+    local asset_name="${download_url##*/}"
+    local checksums_url
+    checksums_url="$(get_checksums_url "$download_url")"
+
+    local work_dir
+    if ! work_dir=$(mktemp -d "${INSTALL_DIR}/.komari-download.XXXXXX"); then
+        log_error "$(msg download_failed)"
+        return 1
+    fi
+    local staged_binary="$work_dir/$asset_name"
+
+    if ! download_file "$download_url" "$staged_binary" "$label"; then
+        rm -rf "$work_dir"
+        return 1
+    fi
+
+    if [ "$INSECURE_SKIP_VERIFY" -eq 1 ]; then
+        log_info "$(msg checksums_skip_warn)"
+    else
+        log_info "$(msg checksums_downloading)"
+        download_checksums "$checksums_url" "$work_dir/SHA256SUMS"
+        local checksum_status=$?
+        if [ "$checksum_status" -eq 2 ]; then
+            # 老版本发布没有 SHA256SUMS：过渡期仅警告后继续安装。
+            log_error "$(msg checksums_missing_warn)"
+        elif [ "$checksum_status" -ne 0 ]; then
+            # 其它下载错误：谨慎起见按失败处理，不安装。
+            log_error "$(msg checksums_download_failed)"
+            rm -rf "$work_dir"
+            return 1
+        else
+            verify_binary_checksum "$work_dir" "$asset_name"
+            local verify_status=$?
+            if [ "$verify_status" -eq 2 ]; then
+                log_error "$(msg checksums_asset_missing "$asset_name")"
+                rm -rf "$work_dir"
+                return 1
+            elif [ "$verify_status" -ne 0 ]; then
+                log_error "$(msg checksums_verify_failed)"
+                rm -rf "$work_dir"
+                return 1
+            fi
+            log_success "$(msg checksums_verified)"
+        fi
+    fi
+
+    # 显式设为 0755，确保以 komari 用户运行的服务仍可读取并执行该二进制。
+    if ! chmod 755 "$staged_binary"; then
+        rm -rf "$work_dir"
+        return 1
+    fi
+    if ! mv -f "$staged_binary" "$dest_path"; then
+        rm -rf "$work_dir"
+        return 1
+    fi
+    rm -rf "$work_dir"
+    return 0
+}
+
 # ==========================================================
 # 业务操作
 # ==========================================================
@@ -1072,7 +1225,7 @@ install_binary() {
     log_step "$(msg download_binary "$EDITION_NAME")"
     log_info "$(msg download_url "$download_url")"
 
-    if ! download_file "$download_url" "$BINARY_PATH" "$EDITION_NAME"; then
+    if ! download_and_verify_binary "$download_url" "$BINARY_PATH" "$EDITION_NAME"; then
         ui_msgbox "$(msg title_error)" "$(msg download_failed)"
         return 1
     fi
@@ -1267,7 +1420,7 @@ upgrade_komari() {
 
     progress_add "$(msg progress_download)"
     log_step "$(msg downloading_latest "$EDITION_NAME")"
-    if ! download_file "$download_url" "$BINARY_PATH" "$EDITION_NAME"; then
+    if ! download_and_verify_binary "$download_url" "$BINARY_PATH" "$EDITION_NAME"; then
         log_error "$(msg download_failed_log)"
         mv "$backup_path" "$BINARY_PATH"
         systemctl start ${SERVICE_NAME}.service
@@ -1434,7 +1587,40 @@ main_menu() {
     done
 }
 
+# 命令行用法说明。
+usage() {
+    printf '%s\n' "Usage: $0 [--insecure-skip-verify]"
+    printf '%s\n' "  --insecure-skip-verify  Skip SHA256SUMS verification of the downloaded binary (NOT recommended)."
+    printf '%s\n' "  -h, --help              Show this help and exit."
+    printf '%s\n' ""
+    printf '%s\n' "用法：$0 [--insecure-skip-verify]"
+    printf '%s\n' "  --insecure-skip-verify  跳过下载二进制的 SHA256SUMS 校验（不推荐）。"
+    printf '%s\n' "  -h, --help              显示帮助并退出。"
+}
+
+# 解析命令行参数。默认会校验 SHA256SUMS，--insecure-skip-verify 可显式跳过。
+parse_arguments() {
+    while [ "$#" -gt 0 ]; do
+        case "$1" in
+            --insecure-skip-verify)
+                INSECURE_SKIP_VERIFY=1
+                ;;
+            -h|--help)
+                usage
+                exit 0
+                ;;
+            *)
+                log_error "$(msg unknown_option "$1")"
+                usage >&2
+                exit 1
+                ;;
+        esac
+        shift
+    done
+}
+
 # Main execution
+parse_arguments "$@"
 check_root
 init_colors
 select_language
