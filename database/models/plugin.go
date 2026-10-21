@@ -19,6 +19,11 @@ type Plugin struct {
 	Permissions   PluginPermissions `json:"permissions"`
 	Configuration Configuration     `json:"configuration"`   // declared config items, same shape as themes
 	Pages         []PluginPage      `json:"pages,omitempty"` // injected admin pages
+	// PublicRPC lists plugin-registered RPC method names that anonymous
+	// visitors may call. Every other plugin RPC method is admin-only by
+	// default. Entries match the name passed to server.registerRPC exactly
+	// (for example "doThing" or "plugin:doThing").
+	PublicRPC []string `json:"public_rpc,omitempty"`
 }
 
 // PluginPermissions declares the plugin capabilities that require admin

@@ -73,6 +73,17 @@ func NamespaceOf(method string) string {
 	return DefaultNamespace
 }
 
+// NormalizeMethodName 返回判权时实际匹配 ACL 规则的方法名。裸方法名（既无 ":"
+// 且不是内部 "rpc." 形式）归入默认命名空间，与 resolveMinRole 的归一化保持
+// 一致。插件为裸方法声明规则时必须使用该归一化后的名字（如 "doThing" ->
+// "common:doThing"），否则精确规则无法命中归一化后的方法名。
+func NormalizeMethodName(method string) string {
+	if !strings.ContainsAny(method, ":") && !strings.HasPrefix(method, "rpc.") {
+		return DefaultNamespace + ":" + method
+	}
+	return method
+}
+
 // computeSpecificity 计算 pattern 的特异性。精确匹配（不含通配符）给一个大 bonus
 // 以保证优先级最高；含通配符的按字面（非 "*"）字符数排序，前缀越长越具体。
 func computeSpecificity(pattern string) (spec int, hasWildcard bool) {
@@ -145,10 +156,9 @@ func wildcardMatch(pattern, s string) bool {
 // resolveMinRole 返回 method 适用规则中特异性最高者的所需角色。无匹配规则时默认 admin。
 func resolveMinRole(method string) string {
 	// 归一化：无命名空间分隔符（既无 ":" 也无 "rpc." 内部前缀）的裸方法名归入默认命名空间，
-	// 以便被 "common:*" 等规则匹配，保持与历史行为一致。
-	if !strings.ContainsAny(method, ":") && !strings.HasPrefix(method, "rpc.") {
-		method = DefaultNamespace + ":" + method
-	}
+	// 以便被 "common:*" 等规则匹配，保持与历史行为一致。插件为裸方法声明的精确规则
+	// 必须同样使用 NormalizeMethodName 归一化后的名字才能命中。
+	method = NormalizeMethodName(method)
 	muACL.RLock()
 	defer muACL.RUnlock()
 	bestSpec := -1
@@ -197,4 +207,3 @@ func CheckPrincipal(p *Principal, method string) bool {
 	}
 	return p.HasRole(min)
 }
-
