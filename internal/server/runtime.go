@@ -101,6 +101,9 @@ func (a *App) BuildRouter() error {
 		return fmt.Errorf("invalid trusted proxies: %w", err)
 	}
 	r.Use(logger.GinLogger(), logger.GinRecovery())
+	// Warn once per hour when a private peer that is not a trusted proxy sends
+	// X-Forwarded-For: such a deployment probably needs --trusted-proxies.
+	r.Use(security.NewProxyTrustWarner(a.trustedProxies).Middleware())
 	cors := security.NewCorsController(a.settings.CorsOriginCheckEnabled, a.settings.CorsAllowedOrigins)
 	r.Use(cors.Middleware(), api.IdentityMiddleware(), api.PrivateSiteMiddleware(), noStoreAPIResponses())
 
