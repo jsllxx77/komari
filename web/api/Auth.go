@@ -2,6 +2,7 @@ package api
 
 import (
 	"bytes"
+	"crypto/subtle"
 	"database/sql"
 	"encoding/json"
 	"io"
@@ -229,5 +230,8 @@ func isApiKeyValid(apiKey string) bool {
 	if apiKeyConfig == "" || len(apiKeyConfig) < 12 {
 		return false
 	}
-	return apiKey == "Bearer "+apiKeyConfig
+	// Constant-time comparison: a byte-by-byte == would leak the shared prefix
+	// length of a guessed key. Lengths are not secret, so an early length check
+	// is fine — ConstantTimeCompare stays branch-free once lengths match.
+	return subtle.ConstantTimeCompare([]byte(apiKey), []byte("Bearer "+apiKeyConfig)) == 1
 }
