@@ -526,6 +526,83 @@ func TestResolvePublicFileScopedToEnabledPublicPages(t *testing.T) {
 		}
 	}
 }
+
+// TestResolvePublicFileRootPageExposesOnlyDeclaredFile covers a public page
+// stored in the plugin root: only that page file may be served, not the
+// manifest, the server-side entry script or another undeclared root asset.
+func TestResolvePublicFileRootPageExposesOnlyDeclaredFile(t *testing.T) {
+	withTempDataDir(t)
+	zipPath := writePluginZip(t, map[string]string{
+		"komari-plugin.json": `{"name":"RootPub","short":"rootpub","version":"1.0.0","pages":[{"file":"index.html","title":"Root","visibility":"public"}]}`,
+		"script.js":          `function load() {}`,
+		"index.html":         `<h1>root</h1>`,
+		"secret.js":          `console.log("secret")`,
+	})
+	if _, err := InstallZip(zipPath); err != nil {
+		t.Fatal(err)
+	}
+	if err := SetEnabled("rootpub", true, true); err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = SetEnabled("rootpub", false, false) }()
+
+	if _, err := ResolvePublicFile("rootpub", "index.html"); err != nil {
+		t.Fatalf("declared root public page must resolve: %v", err)
+	}
+	for _, bad := range []string{
+		"komari-plugin.json", // manifest
+		"secret.js",          // same directory, not a declared page
+		"script.js",          // server-side entry script
+		"",                   // the plugin root itself
+		".",                  // the plugin root itself
+		"/",                  // the plugin root itself
+	} {
+		if full, err := ResolvePublicFile("rootpub", bad); err == nil {
+			t.Fatalf("ResolvePublicFile(%q) = %q, want an error", bad, full)
+		}
+	}
+}
+
+// TestResolvePublicFileSubdirectoryPageKeepsItsAssets covers a public page in a
+// subdirectory: the page and its sibling assets stay reachable while files
+// outside that directory (and the manifest/entry script) do not.
+func TestResolvePublicFileSubdirectoryPageKeepsItsAssets(t *testing.T) {
+	withTempDataDir(t)
+	zipPath := writePluginZip(t, map[string]string{
+		"komari-plugin.json": `{"name":"SubPub","short":"subpub","version":"1.0.0","pages":[{"file":"public/index.html","title":"Sub","visibility":"public"}]}`,
+		"script.js":          `function load() {}`,
+		"public/index.html":  `<h1>sub</h1>`,
+		"public/app.js":      `console.log("app")`,
+		"private/hidden.js":  `console.log("hidden")`,
+	})
+	if _, err := InstallZip(zipPath); err != nil {
+		t.Fatal(err)
+	}
+	if err := SetEnabled("subpub", true, true); err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = SetEnabled("subpub", false, false) }()
+
+	if _, err := ResolvePublicFile("subpub", "public/index.html"); err != nil {
+		t.Fatalf("public page must resolve: %v", err)
+	}
+	if _, err := ResolvePublicFile("subpub", "public/app.js"); err != nil {
+		t.Fatalf("sibling asset must resolve: %v", err)
+	}
+	for _, bad := range []string{
+		"public",             // the directory itself
+		"public/",            // the directory itself
+		"private/hidden.js",  // outside the public page directory
+		"komari-plugin.json", // manifest
+		"script.js",          // server-side entry script
+		"public/../script.js",
+	} {
+		if full, err := ResolvePublicFile("subpub", bad); err == nil {
+			t.Fatalf("ResolvePublicFile(%q) = %q, want an error", bad, full)
+		}
+	}
+}
+
 func TestResolveFileRejectsTraversal(t *testing.T) {
 	withTempDataDir(t)
 	zipPath := writePluginZip(t, map[string]string{

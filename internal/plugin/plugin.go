@@ -623,6 +623,12 @@ func Manifest(short string) (models.Plugin, error) {
 // inside the directory of a page declared with visibility=public, so the page
 // HTML and its relative assets are reachable without exposing the whole
 // plugin directory.
+//
+// A public page stored in the plugin root exposes only that page file itself:
+// every other entry of the root directory (the manifest, the server-side entry
+// script, undeclared assets) stays private. The manifest and the entry script
+// are never served through this path, and directories are rejected so the
+// caller cannot fall back to a directory listing/redirect.
 func ResolvePublicFile(short, name string) (string, error) {
 	if !validShort(short) {
 		return "", fmt.Errorf("invalid plugin short %q", short)
@@ -635,14 +641,38 @@ func ResolvePublicFile(short, name string) (string, error) {
 		return "", err
 	}
 	name = filepath.Clean(strings.TrimPrefix(name, "/"))
+	if !filepath.IsLocal(name) {
+		return "", fmt.Errorf("invalid plugin file path %q", name)
+	}
+	if name == manifestFile || name == filepath.Clean(info.Entry) {
+		return "", fmt.Errorf("plugin file %q is not public", name)
+	}
 	for _, page := range info.Pages {
 		if page.Visibility != models.PageVisibilityPublic || page.Type != models.PageTypeIframe {
 			continue
 		}
-		dir := filepath.Dir(page.File)
-		if dir == "." || name == dir || strings.HasPrefix(name, dir+string(os.PathSeparator)) {
-			return ResolveFile(short, name)
+		file := filepath.Clean(page.File)
+		dir := filepath.Dir(file)
+		if dir == "." {
+			// Root-level page: only the page file itself is public.
+			if name != file {
+				continue
+			}
+		} else if name != file && !strings.HasPrefix(name, dir+string(os.PathSeparator)) {
+			continue
 		}
+		full, err := ResolveFile(short, name)
+		if err != nil {
+			return "", err
+		}
+		stat, err := os.Stat(full)
+		if err != nil {
+			return "", err
+		}
+		if stat.IsDir() {
+			return "", fmt.Errorf("plugin path %q is a directory", name)
+		}
+		return full, nil
 	}
 	return "", fmt.Errorf("plugin page %q is not public", name)
 }
