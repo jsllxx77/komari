@@ -108,7 +108,7 @@ func (w *WebhookSender) createPOSTRequest(addition Addition, message, title stri
 }
 
 func (w *WebhookSender) createGETRequest(addition Addition, message, title string) (*http.Request, error) {
-	URL := w.replaceTemplate(addition.URL, message, title)
+	URL := replaceTemplateURL(addition.URL, message, title)
 	u, err := url.Parse(URL)
 	if err != nil {
 		return nil, fmt.Errorf("invalid URL: %v", err)
@@ -133,6 +133,18 @@ func (w *WebhookSender) replaceTemplate(template, message, title string) string 
 	result := template
 	result = strings.ReplaceAll(result, "{{message}}", message)
 	result = strings.ReplaceAll(result, "{{title}}", title)
+	return result
+}
+
+// replaceTemplateURL 替换 URL 模板中的 {{message}} / {{title}} 占位符，
+// 并对替换后的取值做查询参数转义。
+//
+// GET 模式下替换值来自节点名、事件描述等不可信文本：未转义时其中的 & # 会
+// 注入额外查询参数或截断 URL，而默认通知模板里的换行会让整个请求直接非法。
+// 因此这里统一使用 url.QueryEscape（换行/回车随之变成 %0A/%0D）。
+func replaceTemplateURL(template, message, title string) string {
+	result := strings.ReplaceAll(template, "{{message}}", url.QueryEscape(message))
+	result = strings.ReplaceAll(result, "{{title}}", url.QueryEscape(title))
 	return result
 }
 
