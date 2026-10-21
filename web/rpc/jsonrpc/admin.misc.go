@@ -2,6 +2,8 @@ package jsonrpc
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"math"
@@ -33,12 +35,16 @@ func parseUintKey(s string) (uint, error) {
 func init() {
 	RegisterWithGroupAndMeta("getSessions", rpc.RoleAdmin, adminGetSessions, &rpc.MethodMeta{
 		Name:    "admin:getSessions",
-		Summary: "List all login sessions",
-		Returns: "{ current: string, data: Session[] }",
+		Summary: "List all login sessions (plaintext session is never returned)",
+		Returns: "{ data: Session[] } where Session = { id, ...fields, current }",
 	})
 	RegisterWithGroupAndMeta("deleteSession", rpc.RoleAdmin, adminDeleteSession, &rpc.MethodMeta{
 		Name:    "admin:deleteSession",
-		Summary: "Delete a session by token",
+		Summary: "Delete a session by opaque id (or, transitionally, by plaintext token)",
+		Params: []rpc.ParamMeta{
+			{Name: "id", Type: "string", Required: false, Description: "Opaque session id from admin:getSessions"},
+			{Name: "session", Type: "string", Required: false, Description: "Deprecated plaintext session token"},
+		},
 		Returns: "null",
 	})
 	RegisterWithGroupAndMeta("deleteAllSessions", rpc.RoleAdmin, adminDeleteAllSessions, &rpc.MethodMeta{
@@ -76,6 +82,31 @@ func init() {
 	})
 }
 
+// sessionResponse 是 admin:getSessions 返回给前端的会话视图。
+// 它故意不含明文 session：前端只拿到稳定、不可逆的 id 与 current 标记，
+// 即使响应被读取也无法据此伪造或复用一个可用的会话 token。
+type sessionResponse struct {
+	ID              string     `json:"id"`
+	UUID            string     `json:"uuid"`
+	UserAgent       string     `json:"user_agent"`
+	IP              string     `json:"ip"`
+	LoginMethod     string     `json:"login_method"`
+	LatestOnline    time.Time  `json:"latest_online"`
+	LatestUserAgent string     `json:"latest_user_agent"`
+	LatestIP        string     `json:"latest_ip"`
+	Expires         time.Time  `json:"expires"`
+	MfaVerifiedAt   *time.Time `json:"mfa_verified_at"`
+	CreatedAt       time.Time  `json:"created_at"`
+	Current         bool       `json:"current"`
+}
+
+// sessionID 计算会话的对外标识：hex(sha256(session)) 取前 16 个十六进制字符
+// （64 位）。只是哈希前缀，无法从 id 反推出明文 token；同一 session 结果稳定。
+func sessionID(session string) string {
+	sum := sha256.Sum256([]byte(session))
+	return hex.EncodeToString(sum[:])[:16]
+}
+
 func adminGetSessions(ctx context.Context, _ *rpc.JsonRpcRequest) (any, *rpc.JsonRpcError) {
 	ss, err := accounts.GetAllSessions()
 	if err != nil {
@@ -85,18 +116,62 @@ func adminGetSessions(ctx context.Context, _ *rpc.JsonRpcRequest) (any, *rpc.Jso
 	if meta := rpc.MetaFromContext(ctx); meta != nil {
 		current = meta.SessionToken
 	}
-	return map[string]any{"current": current, "data": ss}, nil
+	data := make([]sessionResponse, 0, len(ss))
+	for _, s := range ss {
+		data = append(data, sessionResponse{
+			ID:              sessionID(s.Session),
+			UUID:            s.UUID,
+			UserAgent:       s.UserAgent,
+			IP:              s.Ip,
+			LoginMethod:     s.LoginMethod,
+			LatestOnline:    s.LatestOnline,
+			LatestUserAgent: s.LatestUserAgent,
+			LatestIP:        s.LatestIp,
+			Expires:         s.Expires,
+			MfaVerifiedAt:   s.MfaVerifiedAt,
+			CreatedAt:       s.CreatedAt,
+			Current:         current != "" && s.Session == current,
+		})
+	}
+	return map[string]any{"data": data}, nil
 }
 
+// adminDeleteSession 删除一个会话。优先按 admin:getSessions 返回的不透明 id
+// （服务端遍历现存会话比对）删除；过渡期仍接受明文 session，保持旧行为。
 func adminDeleteSession(ctx context.Context, req *rpc.JsonRpcRequest) (any, *rpc.JsonRpcError) {
 	var params struct {
 		Session string `json:"session"`
+		ID      string `json:"id"`
 	}
-	req.BindParams(&params)
-	if params.Session == "" {
-		return nil, rpc.MakeError(rpc.InvalidParams, "session is required", nil)
+	if err := req.BindParams(&params); err != nil {
+		return nil, rpc.MakeError(rpc.InvalidParams, "Invalid request body: "+err.Error(), nil)
 	}
-	if err := accounts.DeleteSession(params.Session); err != nil {
+	target := strings.TrimSpace(params.Session)
+	id := strings.TrimSpace(params.ID)
+	if target == "" && id == "" {
+		return nil, rpc.MakeError(rpc.InvalidParams, "session or id is required", nil)
+	}
+
+	if id != "" {
+		// 只信任服务端现存的 session 列表：用 id 反查真实 token 后再删除。
+		ss, err := accounts.GetAllSessions()
+		if err != nil {
+			return nil, rpc.MakeError(rpc.InternalError, "Failed to retrieve sessions: "+err.Error(), nil)
+		}
+		matched := ""
+		for _, s := range ss {
+			if strings.EqualFold(sessionID(s.Session), id) {
+				matched = s.Session
+				break
+			}
+		}
+		if matched == "" {
+			return nil, rpc.MakeError(rpc.InvalidParams, "session not found", nil)
+		}
+		target = matched
+	}
+
+	if err := accounts.DeleteSession(target); err != nil {
 		return nil, rpc.MakeError(rpc.InternalError, "Failed to delete session: "+err.Error(), nil)
 	}
 	actor, ip := auditActor(ctx)
