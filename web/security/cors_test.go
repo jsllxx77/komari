@@ -144,6 +144,102 @@ func TestCorsMiddlewareSkipsNonAPIPaths(t *testing.T) {
 	}
 }
 
+func TestCorsMiddlewareWildcardAllowlistOmitsCredentials(t *testing.T) {
+	setupCORSConfigDB(t, "")
+	router := setupCORSRouter(true, "*")
+
+	response := performCORSRequest(router, http.MethodGet, "/api/ping", "api.example", "https://evil.example")
+	if response.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d", response.Code, http.StatusOK)
+	}
+	if got := response.Header().Get("Access-Control-Allow-Origin"); got != "https://evil.example" {
+		t.Fatalf("Access-Control-Allow-Origin = %q, want the echoed Origin", got)
+	}
+	if got := response.Header().Get("Access-Control-Allow-Credentials"); got != "" {
+		t.Fatalf("Access-Control-Allow-Credentials = %q, want empty for a wildcard allowlist", got)
+	}
+	if got := response.Header().Get("Vary"); got != "Origin" {
+		t.Fatalf("Vary = %q, want %q", got, "Origin")
+	}
+
+	preflight := performCORSRequest(router, http.MethodOptions, "/api/ping", "api.example", "https://evil.example")
+	if preflight.Code != http.StatusNoContent {
+		t.Fatalf("preflight status = %d, want %d", preflight.Code, http.StatusNoContent)
+	}
+	if got := preflight.Header().Get("Access-Control-Allow-Credentials"); got != "" {
+		t.Fatalf("preflight Access-Control-Allow-Credentials = %q, want empty for a wildcard allowlist", got)
+	}
+}
+
+func TestCorsMiddlewareExactAllowlistKeepsCredentials(t *testing.T) {
+	setupCORSConfigDB(t, "")
+	router := setupCORSRouter(true, "https://allowed.example")
+
+	response := performCORSRequest(router, http.MethodGet, "/api/ping", "api.example", "https://allowed.example")
+	if response.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d", response.Code, http.StatusOK)
+	}
+	if got := response.Header().Get("Access-Control-Allow-Origin"); got != "https://allowed.example" {
+		t.Fatalf("Access-Control-Allow-Origin = %q", got)
+	}
+	if got := response.Header().Get("Access-Control-Allow-Credentials"); got != "true" {
+		t.Fatalf("Access-Control-Allow-Credentials = %q, want %q for an exact allowlist match", got, "true")
+	}
+	if got := response.Header().Get("Vary"); got != "Origin" {
+		t.Fatalf("Vary = %q, want %q", got, "Origin")
+	}
+
+	sameHost := performCORSRequest(router, http.MethodGet, "/api/ping", "api.example", "https://api.example")
+	if got := sameHost.Header().Get("Access-Control-Allow-Credentials"); got != "true" {
+		t.Fatalf("same-host Access-Control-Allow-Credentials = %q, want %q", got, "true")
+	}
+}
+
+func TestCorsMiddlewareWildcardWithExplicitEntryKeepsCredentialsForThatEntry(t *testing.T) {
+	setupCORSConfigDB(t, "")
+	router := setupCORSRouter(true, "*,https://allowed.example")
+
+	explicit := performCORSRequest(router, http.MethodGet, "/api/ping", "api.example", "https://allowed.example")
+	if got := explicit.Header().Get("Access-Control-Allow-Credentials"); got != "true" {
+		t.Fatalf("explicitly listed Origin Access-Control-Allow-Credentials = %q, want %q", got, "true")
+	}
+
+	wildcard := performCORSRequest(router, http.MethodGet, "/api/ping", "api.example", "https://other.example")
+	if got := wildcard.Header().Get("Access-Control-Allow-Credentials"); got != "" {
+		t.Fatalf("wildcard-only Origin Access-Control-Allow-Credentials = %q, want empty", got)
+	}
+}
+
+func TestOriginInAllowlistReportsWildcard(t *testing.T) {
+	tests := []struct {
+		name         string
+		allowlist    string
+		origin       string
+		wantMatched  bool
+		wantWildcard bool
+	}{
+		{name: "wildcard", allowlist: "*", origin: "https://any.example", wantMatched: true, wantWildcard: true},
+		{name: "wildcard among entries", allowlist: "https://allowed.example,*", origin: "https://any.example", wantMatched: true, wantWildcard: true},
+		{name: "exact entry wins over leading wildcard", allowlist: "*,https://allowed.example", origin: "https://allowed.example", wantMatched: true},
+		{name: "exact origin", allowlist: "https://allowed.example", origin: "https://allowed.example", wantMatched: true},
+		{name: "exact host", allowlist: "allowed.example", origin: "http://allowed.example", wantMatched: true},
+		{name: "no match", allowlist: "https://allowed.example", origin: "https://evil.example"},
+		{name: "invalid origin", allowlist: "*", origin: "not-a-url"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			matched, viaWildcard := OriginInAllowlist(tt.origin, tt.allowlist)
+			if matched != tt.wantMatched {
+				t.Fatalf("OriginInAllowlist(%q, %q) matched = %v, want %v", tt.origin, tt.allowlist, matched, tt.wantMatched)
+			}
+			if viaWildcard != tt.wantWildcard {
+				t.Fatalf("OriginInAllowlist(%q, %q) viaWildcard = %v, want %v", tt.origin, tt.allowlist, viaWildcard, tt.wantWildcard)
+			}
+		})
+	}
+}
+
 func setupCORSRouter(enabled bool, allowlist string) *gin.Engine {
 	gin.SetMode(gin.TestMode)
 	router := gin.New()

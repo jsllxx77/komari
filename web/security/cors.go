@@ -68,10 +68,26 @@ func (ctrl *CorsController) Middleware() gin.HandlerFunc {
 
 		origin := c.GetHeader("Origin")
 		allowOrigin := ""
-		if origin != "" && (IsAPIKeyRequest(c.Request) ||
-			OriginMatchesHost(origin, c.Request.Host) ||
-			OriginInAllowlist(origin, corsAllowedOrigins)) {
-			allowOrigin = origin
+		// allowCredentials stays false for allowlist entries reached through a
+		// "*" wildcard: echoing the Origin (for public, cookie-less reads) is
+		// fine, but combining a wildcard with Allow-Credentials would let any
+		// site read authenticated responses with the user's cookies.
+		allowCredentials := false
+		if origin != "" {
+			allowlistMatched, viaWildcard := OriginInAllowlist(origin, corsAllowedOrigins)
+			switch {
+			case IsAPIKeyRequest(c.Request):
+				allowOrigin = origin
+				allowCredentials = true
+			case OriginMatchesHost(origin, c.Request.Host):
+				allowOrigin = origin
+				allowCredentials = true
+			case allowlistMatched && !viaWildcard:
+				allowOrigin = origin
+				allowCredentials = true
+			case allowlistMatched:
+				allowOrigin = origin
+			}
 		}
 
 		authorizationPreflight := origin != "" && allowOrigin == "" && IsAuthorizationPreflight(c.Request)
@@ -85,7 +101,7 @@ func (ctrl *CorsController) Middleware() gin.HandlerFunc {
 			c.Header("Access-Control-Allow-Methods", "GET, POST, PUT, PATCH, DELETE, HEAD, OPTIONS")
 			c.Header("Access-Control-Allow-Headers", "Origin, Content-Length, Content-Type, Authorization, Accept, X-CSRF-Token, X-Requested-With, Set-Cookie, X-2FA-Code, X-Two-Factor-Code")
 			c.Header("Access-Control-Expose-Headers", "Content-Length, Authorization, Set-Cookie")
-			if !authorizationPreflight {
+			if !authorizationPreflight && allowCredentials {
 				c.Header("Access-Control-Allow-Credentials", "true")
 			}
 			c.Header("Access-Control-Max-Age", "43200") // 12 hours

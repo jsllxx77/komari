@@ -96,5 +96,6 @@ func CheckWebSocketOrigin(r *http.Request) bool {
 		return true
 	}
 	allowlist, _ := config.GetAs[string](config.WsAllowedOriginsKey, "")
-	return security.OriginInAllowlist(origin, allowlist)
+	matched, _ := security.OriginInAllowlist(origin, allowlist)
+	return matched
 }

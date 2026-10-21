@@ -28,27 +28,39 @@ func OriginMatchesHost(origin, host string) bool {
 	return ok && strings.EqualFold(originHost, host)
 }
 
-func OriginInAllowlist(origin, rawAllowlist string) bool {
+// OriginInAllowlist reports whether origin is allowed by rawAllowlist. The
+// second return value is true only when the match came from a "*" entry, so
+// callers can avoid sending credentials for wildcard matches.
+//
+// Exact entries are evaluated first so an explicitly listed Origin keeps the
+// credentialed behavior even when a wildcard is configured alongside it.
+func OriginInAllowlist(origin, rawAllowlist string) (matched bool, viaWildcard bool) {
 	normalizedOrigin, originHost, ok := normalizeOrigin(origin)
 	if !ok {
-		return false
+		return false, false
 	}
-	for _, entry := range SplitAllowlist(rawAllowlist) {
+	entries := SplitAllowlist(rawAllowlist)
+	for _, entry := range entries {
 		if entry == "*" {
-			return true
+			continue
 		}
 		if strings.Contains(entry, "://") {
 			normalizedEntry, _, ok := normalizeOrigin(entry)
 			if ok && strings.EqualFold(normalizedEntry, normalizedOrigin) {
-				return true
+				return true, false
 			}
 			continue
 		}
 		if strings.EqualFold(entry, originHost) {
-			return true
+			return true, false
 		}
 	}
-	return false
+	for _, entry := range entries {
+		if entry == "*" {
+			return true, true
+		}
+	}
+	return false, false
 }
 
 func IsAPIKeyRequest(r *http.Request) bool {
