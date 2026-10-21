@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"time"
@@ -133,6 +134,18 @@ func servePost(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, jerr.Response())
 		return
 	}
+	if limit := rpcBatchLimit(meta); len(requests) > limit {
+		c.JSON(http.StatusBadRequest, rpc.ErrorResponse(nil, rpc.InvalidRequest,
+			fmt.Sprintf("batch too large: at most %d requests per call", limit), nil))
+		return
+	}
+	// 匿名来源按批量条数额外扣减令牌（中间件已扣 1 个）。
+	if meta != nil && meta.Principal != nil && meta.Principal.Type == rpc.PrincipalAnonymous {
+		if !anonRateLimiter.charge(c.ClientIP(), len(requests)-1) {
+			c.JSON(http.StatusTooManyRequests, rpc.ErrorResponse(nil, rpc.InvalidRequest, "Too many requests, please slow down.", nil))
+			return
+		}
+	}
 
 	responses := make([]*rpc.JsonRpcResponse, 0, len(requests))
 	for _, rreq := range requests {
@@ -159,6 +172,21 @@ func rpcBodyLimit(meta *rpc.ContextMeta) int64 {
 		return maxAnonymousRPCBody
 	}
 	return maxRPCBody
+}
+
+const (
+	// maxAnonymousRPCBatch 限制匿名单次 JSON-RPC 批量请求的条数。
+	maxAnonymousRPCBatch = 20
+	// maxAuthenticatedRPCBatch 限制已认证调用方的批量条数。
+	maxAuthenticatedRPCBatch = 200
+)
+
+// rpcBatchLimit 返回本次调用允许的最大批量条数。
+func rpcBatchLimit(meta *rpc.ContextMeta) int {
+	if meta == nil || meta.Principal == nil || meta.Principal.Type == rpc.PrincipalAnonymous {
+		return maxAnonymousRPCBatch
+	}
+	return maxAuthenticatedRPCBatch
 }
 
 // buildContextMeta 从 gin.Context 构建 *rpc.ContextMeta。

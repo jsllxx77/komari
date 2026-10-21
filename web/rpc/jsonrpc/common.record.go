@@ -10,6 +10,7 @@ import (
 	"github.com/komari-monitor/komari/database/models"
 	recordsdb "github.com/komari-monitor/komari/database/records"
 	"github.com/komari-monitor/komari/database/tasks"
+	"github.com/komari-monitor/komari/internal/metricstore"
 	"github.com/komari-monitor/komari/pkg/rpc"
 )
 
@@ -37,6 +38,11 @@ func getRecords(ctx context.Context, req *rpc.JsonRpcRequest) (any, *rpc.JsonRpc
 	if params.Type == "" {
 		params.Type = "load"
 	}
+	if err := ctx.Err(); err != nil {
+		return nil, rpc.MakeError(rpc.InternalError, "request cancelled", err.Error())
+	}
+	// 查询窗口上限：以指标保留时长为准（F-08），避免匿名访客用 hours=100000 拉全部历史。
+	windowHours := recordWindowLimitHours(ctx)
 	// parse time window
 	var startTime, endTime time.Time
 	if params.Start != nil || params.End != nil {
@@ -52,10 +58,16 @@ func getRecords(ctx context.Context, req *rpc.JsonRpcRequest) (any, *rpc.JsonRpc
 		} else {
 			startTime = params.Start.UTC()
 		}
+		if endTime.Sub(startTime) > time.Duration(windowHours)*time.Hour {
+			startTime = endTime.Add(-time.Duration(windowHours) * time.Hour)
+		}
 	} else {
 		hours := params.Hours
 		if hours <= 0 {
 			hours = 1 // default 1 hour
+		}
+		if hours > windowHours {
+			hours = windowHours
 		}
 		endTime = time.Now().UTC()
 		startTime = endTime.Add(-time.Duration(hours) * time.Hour)
@@ -63,6 +75,7 @@ func getRecords(ctx context.Context, req *rpc.JsonRpcRequest) (any, *rpc.JsonRpc
 
 	// Hidden filtering for non-admin
 	isAdmin := meta.Principal != nil && meta.Principal.HasRole(rpc.RoleAdmin)
+	maxCount := clampRecordMaxCount(params.MaxCount, isAdmin)
 	hidden := map[string]bool{}
 	if !isAdmin {
 		cinfo, err := clients.GetAllClientBasicInfo()
@@ -98,13 +111,7 @@ func getRecords(ctx context.Context, req *rpc.JsonRpcRequest) (any, *rpc.JsonRpc
 			recs = filtered
 		}
 
-		// resolve maxCount default for load
-		maxCount := params.MaxCount
-		if maxCount == 0 {
-			maxCount = 4000
-		}
-
-		// optional load_type filtering -> group by client
+		// load_type filtering -> group by client
 		if params.LoadType != "" && params.LoadType != "all" {
 			items := filterRecordsByLoadType(recs, params.LoadType)
 			grouped := make(map[string][]flatRecord)
@@ -142,6 +149,9 @@ func getRecords(ctx context.Context, req *rpc.JsonRpcRequest) (any, *rpc.JsonRpc
 		// default: return full records, grouped by client
 		grouped := make(map[string][]models.Record)
 		for _, r := range recs {
+			if err := ctx.Err(); err != nil {
+				return nil, rpc.MakeError(rpc.InternalError, "request cancelled", err.Error())
+			}
 			grouped[r.Client] = append(grouped[r.Client], r)
 		}
 		total := 0
@@ -222,6 +232,9 @@ func getRecords(ctx context.Context, req *rpc.JsonRpcRequest) (any, *rpc.JsonRpc
 		})
 
 		for _, r := range recs {
+			if err := ctx.Err(); err != nil {
+				return nil, rpc.MakeError(rpc.InternalError, "request cancelled", err.Error())
+			}
 			rr := RecordsResp{
 				TaskId: r.TaskId,
 				Time:   r.Time,
@@ -381,11 +394,7 @@ func getRecords(ctx context.Context, req *rpc.JsonRpcRequest) (any, *rpc.JsonRpc
 			toList = append(toList, info)
 		}
 		response.Tasks = toList
-		// apply maxCount for ping
-		maxCount := params.MaxCount
-		if maxCount == 0 {
-			maxCount = 4000
-		}
+		// apply maxCount for ping (already clamped per caller role)
 		if maxCount != -1 && len(response.Records) > maxCount {
 			// group records by TaskId for proportional downsampling
 			taskGroups := make(map[uint][]RecordsResp)
@@ -431,6 +440,48 @@ func getRecords(ctx context.Context, req *rpc.JsonRpcRequest) (any, *rpc.JsonRpc
 }
 
 // ---------- helpers for load records ----------
+
+const (
+	// defaultRecordWindowHours 是读不到保留时长时的查询窗口上限（30 天）。
+	defaultRecordWindowHours = 720
+	// maxRecordWindowHoursLimit 是窗口上限的硬顶（一年），避免保留配置异常大时被滥用。
+	maxRecordWindowHoursLimit = 8760
+	// defaultRecordMaxCount 是默认返回点数上限。
+	defaultRecordMaxCount = 4000
+	// maxRecordMaxCount 是普通调用方允许的最大返回点数。
+	maxRecordMaxCount = 10000
+)
+
+// recordWindowLimitHours 返回允许查询的最大时间窗（小时）。
+func recordWindowLimitHours(ctx context.Context) int {
+	summary, err := metricstore.GetRetentionSummary(ctx)
+	if err != nil || summary.MaxDays <= 0 {
+		return defaultRecordWindowHours
+	}
+	hours := summary.MaxDays * 24
+	if hours <= 0 || hours > maxRecordWindowHoursLimit {
+		return maxRecordWindowHoursLimit
+	}
+	return hours
+}
+
+// clampRecordMaxCount 收紧返回点数上限：非管理员不允许 -1（不降采样），
+// 统一退回默认值并夹到 [1, maxRecordMaxCount]；管理员保留 -1 语义。
+func clampRecordMaxCount(requested int, isAdmin bool) int {
+	if requested == 0 {
+		return defaultRecordMaxCount
+	}
+	if requested < 0 {
+		if isAdmin {
+			return -1
+		}
+		return defaultRecordMaxCount
+	}
+	if requested > maxRecordMaxCount {
+		return maxRecordMaxCount
+	}
+	return requested
+}
 
 // getLoadRecordsCombined fetches records for a client or all clients within a time range,
 // combining recent short-term table and long-term table with 15-min grouping for recent part.

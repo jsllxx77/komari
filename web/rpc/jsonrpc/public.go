@@ -153,6 +153,10 @@ func publicGetRecordsByUUID(ctx context.Context, req *rpc.JsonRpcRequest) (any, 
 	if err != nil {
 		return nil, rpc.MakeError(rpc.InvalidParams, "Invalid hours parameter", nil)
 	}
+	// F-08：把查询窗口夹到保留时长内，避免匿名访客一次拉全部历史。
+	if limit := recordWindowLimitHours(ctx); hoursInt > limit {
+		hoursInt = limit
+	}
 	validLoadTypes := map[string]bool{
 		"cpu": true, "ram": true, "swap": true,
 		"load": true, "temp": true, "disk": true, "network": true,
@@ -336,8 +340,12 @@ func publicGetPingRecords(ctx context.Context, req *rpc.JsonRpcRequest) (any, *r
 		hours = "4"
 	}
 	hoursInt, err := strconv.Atoi(hours)
-	if err != nil {
+	if err != nil || hoursInt <= 0 {
 		hoursInt = 4
+	}
+	// F-08：同上，限制可查询的时间窗。
+	if limit := recordWindowLimitHours(ctx); hoursInt > limit {
+		hoursInt = limit
 	}
 	endTime := time.Now().UTC()
 	startTime := endTime.Add(-time.Duration(hoursInt) * time.Hour)

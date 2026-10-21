@@ -61,14 +61,14 @@ func registerPublicRoutes(r *gin.Engine) {
 	r.GET("/api/nodes", jsonRpc.Bind("public:getNodesInformation"))
 	r.GET("/api/public", jsonRpc.Bind("public:getPublicSettings"))
 	r.GET("/api/version", jsonRpc.Bind("public:getVersion"))
-	r.GET("/api/recent/:uuid", jsonRpc.Bind("public:getClientRecentRecords", jsonRpc.WithPath("uuid")))
-	r.GET("/api/records/load", jsonRpc.Bind("public:getRecordsByUUID", jsonRpc.WithQuery("uuid", "load_type", "hours")))
-	r.GET("/api/records/ping", jsonRpc.Bind("public:getPingRecords", jsonRpc.WithQuery("uuid", "task_id", "hours")))
+	r.GET("/api/recent/:uuid", jsonRpc.AnonymousRateLimit(), jsonRpc.Bind("public:getClientRecentRecords", jsonRpc.WithPath("uuid")))
+	r.GET("/api/records/load", jsonRpc.AnonymousRateLimit(), jsonRpc.Bind("public:getRecordsByUUID", jsonRpc.WithQuery("uuid", "load_type", "hours")))
+	r.GET("/api/records/ping", jsonRpc.AnonymousRateLimit(), jsonRpc.Bind("public:getPingRecords", jsonRpc.WithQuery("uuid", "task_id", "hours")))
 	r.GET("/api/task/ping", jsonRpc.Bind("public:getPublicPingTasks"))
 
 	// JSON-RPC 直连入口（匿名来源按 IP 限速，见 F-08）。
-	r.GET("/api/rpc2", jsonRpc.OnRpcRequest)
-	r.POST("/api/rpc2", jsonRpc.OnRpcRequest)
+	r.GET("/api/rpc2", jsonRpc.AnonymousRateLimit(), jsonRpc.OnRpcRequest)
+	r.POST("/api/rpc2", jsonRpc.AnonymousRateLimit(), jsonRpc.OnRpcRequest)
 }
 
 // registerAgentRoutes agent（客户端）上报与拉取路由。
