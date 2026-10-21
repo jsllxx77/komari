@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/komari-monitor/komari/internal/config"
+	logger "github.com/komari-monitor/komari/utils/log"
 	"gorm.io/gorm"
 )
 
@@ -19,6 +20,21 @@ import (
 const marketDownloadMaxBytes = 100 << 20
 
 const marketDownloadTimeout = 45 * time.Second
+
+// dangerouslyTargetedMarketPrefixes lists address ranges that are never a
+// legitimate market source: loopback, link-local (including cloud metadata
+// endpoints) and the unspecified address. They are rejected even when the
+// administrator explicitly disables SSRF protection, because a mistyped or
+// attacker-influenced URL there can never be intended. Private ranges
+// (10/8, 172.16/12, 192.168/16) stay allowed: self-hosted intranet markets are
+// a supported deployment.
+var dangerouslyTargetedMarketPrefixes = []netip.Prefix{
+	netip.MustParsePrefix("127.0.0.0/8"),    // IPv4 loopback.
+	netip.MustParsePrefix("169.254.0.0/16"), // IPv4 link-local, incl. 169.254.169.254 metadata.
+	netip.MustParsePrefix("fe80::/10"),      // IPv6 link-local.
+	netip.MustParsePrefix("0.0.0.0/32"),     // IPv4 unspecified.
+	netip.MustParsePrefix("::/128"),         // IPv6 unspecified.
+}
 
 var blockedMarketIPPrefixes = []netip.Prefix{
 	netip.MustParsePrefix("0.0.0.0/8"),
@@ -46,12 +62,13 @@ func IsSSRFProtectionEnabled() bool {
 	return err != nil || enabled
 }
 
-// DownloadMarketURL performs a market download. When SSRF protection is
-// enabled, URLs resolving to private or internal addresses are rejected
-// (including on every redirect hop); when disabled, downloads proceed
-// without address filtering.
+// DownloadMarketURL performs a market download. Loopback, link-local and
+// unspecified targets are always rejected. When SSRF protection is enabled,
+// URLs resolving to private or internal addresses are rejected as well
+// (including on every redirect hop); when it is disabled, downloads to other
+// addresses proceed without further filtering.
 func DownloadMarketURL(rawURL string, maxSize int64) ([]byte, error) {
-	if err := validateMarketDownloadURL(rawURL); err != nil {
+	if err := validateMarketDownloadTarget(rawURL); err != nil {
 		return nil, err
 	}
 	protectionEnabled, err := ssrfProtectionEnabled()
@@ -70,7 +87,7 @@ func DownloadMarketURL(rawURL string, maxSize int64) ([]byte, error) {
 			if len(via) >= 10 {
 				return errors.New("too many redirects")
 			}
-			return validateMarketDownloadURL(req.URL.String())
+			return validateMarketDownloadTarget(req.URL.String())
 		},
 	}
 
@@ -101,6 +118,66 @@ func validateMarketDownloadURL(rawURL string) error {
 		return errors.New("only HTTP and HTTPS URLs are allowed")
 	}
 	return nil
+}
+
+// validateMarketDownloadTarget applies the scheme/userinfo checks and then
+// rejects targets that are obviously never a market source, even when SSRF
+// protection has been switched off by the administrator.
+func validateMarketDownloadTarget(rawURL string) error {
+	if err := validateMarketDownloadURL(rawURL); err != nil {
+		return err
+	}
+	return rejectDangerousMarketHost(rawURL)
+}
+
+// rejectDangerousMarketHost resolves the URL host and refuses loopback,
+// link-local and unspecified addresses. Resolution failures fail closed.
+func rejectDangerousMarketHost(rawURL string) error {
+	parsed, err := url.Parse(rawURL)
+	if err != nil {
+		return err
+	}
+	host := parsed.Hostname()
+	if host == "" {
+		return errors.New("only HTTP and HTTPS URLs are allowed")
+	}
+
+	ips, err := net.LookupIP(host)
+	if err != nil {
+		return fmt.Errorf("failed to resolve market download host %q: %w", host, err)
+	}
+	if len(ips) == 0 {
+		return errors.New("host did not resolve to an IP address")
+	}
+	for _, ip := range ips {
+		if isDangerousMarketIP(ip) {
+			return fmt.Errorf("market download host %q resolves to a loopback, link-local, or unspecified address", host)
+		}
+	}
+	return nil
+}
+
+// isDangerousMarketIP reports whether ip is a loopback, link-local, or
+// unspecified address. A nil (unparseable) address counts as dangerous.
+func isDangerousMarketIP(ip net.IP) bool {
+	if ip == nil {
+		return true
+	}
+	if ip.IsLoopback() || ip.IsLinkLocalUnicast() || ip.IsUnspecified() {
+		return true
+	}
+
+	address, ok := netip.AddrFromSlice(ip)
+	if !ok {
+		return true
+	}
+	address = address.Unmap()
+	for _, prefix := range dangerouslyTargetedMarketPrefixes {
+		if prefix.Contains(address) {
+			return true
+		}
+	}
+	return false
 }
 
 func newSSRFProtectedTransport() *http.Transport {
@@ -199,10 +276,15 @@ func ssrfProtectionEnabled() (bool, error) {
 		return enabled, nil
 	}
 	if !errors.Is(err, gorm.ErrRecordNotFound) {
+		// Fail closed: an unreadable setting must not silently disable filtering.
 		return false, err
 	}
-	if err := config.Set(config.SSRFProtectionEnabledKey, false); err != nil {
+	// The key is absent (fresh install or an upgraded installation that predates
+	// this option): enable protection and persist it so administrators can still
+	// switch it off explicitly.
+	if err := config.Set(config.SSRFProtectionEnabledKey, true); err != nil {
 		return false, err
 	}
-	return false, nil
+	logger.Info("admin-api", "ssrf_protection_enabled was not configured; SSRF protection is now enabled by default for market downloads")
+	return true, nil
 }
