@@ -341,8 +341,10 @@ func Close() error {
 func doInitialize() error {
 	var err error
 
-	// 在数据库初始化前执行：如果存在 ./data/backup.zip，则进行恢复逻辑
-	func() {
+	// 在数据库初始化前执行：如果存在 ./data/backup.zip，则进行恢复逻辑。
+	// 返回非 nil 表示恢复已被中止：此时 ./data 与 backup.zip 都保持原样，
+	// 由管理员人工处理，绝不在没有回滚快照的情况下清空数据。
+	if restoreErr := func() error {
 		backupZipPath := filepath.Join(".", "data", "backup.zip")
 		if _, statErr := os.Stat(backupZipPath); statErr == nil {
 			// 4. 将当前数据快照保存到 ./data/backup/，并保留已有归档。
@@ -353,10 +355,11 @@ func doInitialize() error {
 				tsName := time.Now().UTC().Format("20060102-150405")
 				bakPath := filepath.Join(backupDir, fmt.Sprintf("pre-restore-%s.zip", tsName))
 				if zipErr := zipDirectoryExcluding("./data", bakPath, map[string]struct{}{backupZipPath: {}, backupDir: {}}); zipErr != nil {
-					logger.Errorf("dbcore", "[restore] failed to zip current data: %v", zipErr)
-				} else {
-					logger.Infof("dbcore", "[restore] current data zipped to %s", bakPath)
+					// 快照失败必须中止恢复：否则下面的删除 + 解压会让当前数据
+					// 在没有可回滚快照的情况下被覆盖。保留 backup.zip 以便重试。
+					return fmt.Errorf("failed to zip current data, restore aborted: %w", zipErr)
 				}
+				logger.Infof("dbcore", "[restore] current data zipped to %s", bakPath)
 			}
 
 			// 5. 删除数据文件，但保留归档目录和待恢复的 backup.zip。
@@ -384,7 +387,10 @@ func doInitialize() error {
 				logger.Infof("dbcore", "[restore] komari-backup-markup removed")
 			}
 		}
-	}()
+		return nil
+	}(); restoreErr != nil {
+		logger.Errorf("dbcore", "[restore] %v", restoreErr)
+	}
 
 	// 记录“打开数据库之前”komari.db 是否已存在，用于区分全新安装与旧版升级。
 	// 必须在（可能的）恢复逻辑之后、gorm.Open 之前采集：恢复会解压出旧库，
