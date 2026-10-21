@@ -105,7 +105,7 @@ func (a *App) BuildRouter() error {
 	// X-Forwarded-For: such a deployment probably needs --trusted-proxies.
 	r.Use(security.NewProxyTrustWarner(a.trustedProxies).Middleware())
 	cors := security.NewCorsController(a.settings.CorsOriginCheckEnabled, a.settings.CorsAllowedOrigins)
-	r.Use(cors.Middleware(), api.IdentityMiddleware(), api.PrivateSiteMiddleware(), noStoreAPIResponses())
+	r.Use(cors.Middleware(), api.IdentityMiddleware(), api.CSRFProtection(), api.PrivateSiteMiddleware(), noStoreAPIResponses())
 
 	// The recovery UI belongs only to its temporary restricted listener.
 	r.GET(recoveryweb.PagePath, func(c *gin.Context) {

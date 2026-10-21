@@ -39,7 +39,9 @@ func Register(r *gin.Engine) {
 func registerPublicRoutes(r *gin.Engine) {
 	// 非 JSON / 特殊流程，保留 REST handler。
 	r.POST("/api/login", public_api.Login)
-	r.GET("/api/logout", public_api.Logout)
+	// 登出会改状态：改为 POST；过渡期保留 GET，但要求同源导航（见 F-07）。
+	r.POST("/api/logout", public_api.Logout)
+	r.GET("/api/logout", api.LegacyStateChangingGet(), public_api.Logout)
 	r.GET("/api/oauth", public_api.OAuth)
 	r.GET("/api/oauth_callback", public_api.OAuthCallback)
 	// OAuth 登录的第二因子页面（服务端渲染，前端源码不在本仓库）。
@@ -64,7 +66,7 @@ func registerPublicRoutes(r *gin.Engine) {
 	r.GET("/api/records/ping", jsonRpc.Bind("public:getPingRecords", jsonRpc.WithQuery("uuid", "task_id", "hours")))
 	r.GET("/api/task/ping", jsonRpc.Bind("public:getPublicPingTasks"))
 
-	// JSON-RPC 直连入口。
+	// JSON-RPC 直连入口（匿名来源按 IP 限速，见 F-08）。
 	r.GET("/api/rpc2", jsonRpc.OnRpcRequest)
 	r.POST("/api/rpc2", jsonRpc.OnRpcRequest)
 }
@@ -115,7 +117,8 @@ func registerAdminRoutes(r *gin.Engine) {
 	{
 		theme.GET("/list", admin.ListThemes)
 		theme.POST("/delete", api.RequireSensitive2FA(), admin.DeleteTheme)
-		theme.GET("/set", admin.SetTheme)
+		// 切主题会写配置：以 POST 为准；过渡期保留 GET，但只允许同源导航。
+		theme.GET("/set", api.LegacyStateChangingGet(), admin.SetTheme)
 		theme.POST("/set", admin.SetTheme)
 		theme.POST("/update", api.RequireSensitive2FA(), admin.UpdateTheme)
 		theme.POST("/import", api.RequireSensitive2FA(), admin.ImportTheme)
@@ -141,7 +144,9 @@ func registerAdminRoutes(r *gin.Engine) {
 	// oauth2 绑定走重定向，保留 REST handler。
 	oauth2 := g.Group("/oauth2")
 	{
-		oauth2.GET("/bind", api.RequireSensitive2FA(), admin.BindingExternalAccount)
+		// 绑定第三方账号会改登录方式：以 POST 为准；过渡期保留 GET，但只允许同源导航。
+		oauth2.GET("/bind", api.LegacyStateChangingGet(), api.RequireSensitive2FA(), admin.BindingExternalAccount)
+		oauth2.POST("/bind", api.RequireSensitive2FA(), admin.BindingExternalAccount)
 		oauth2.POST("/unbind", api.RequireSensitive2FA(), admin.UnbindExternalAccount)
 	}
 
