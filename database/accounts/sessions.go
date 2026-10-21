@@ -82,14 +82,14 @@ func GetSession(session string) (uuid string, err error) {
 	return sessionRecord.UUID, nil
 }
 
+// GetUserBySession 根据会话 ID 获取用户。会话有效性（存在且未过期）由
+// GetSession 负责检查，过期会话会被删除，因此这里不会返回已过期的登录态。
 func GetUserBySession(session string) (models.User, error) {
-	db := dbcore.GetDBInstance()
-	var sessionRecord models.Session
-	err := db.Where("session = ?", session).First(&sessionRecord).Error
+	uuid, err := GetSession(session)
 	if err != nil {
 		return models.User{}, err
 	}
-	return GetUserByUUID(sessionRecord.UUID)
+	return GetUserByUUID(uuid)
 }
 
 // DeleteSession 删除指定会话
