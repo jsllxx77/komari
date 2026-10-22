@@ -158,6 +158,80 @@ func TestTwoFactorStatusWithout2FAAndUnauthenticated(t *testing.T) {
 	}
 }
 
+// newFullTestEngine 挂上身份识别与 CSRF 中间件以及公开、管理员路由（与 runtime.go 顺序一致）。
+func newFullTestEngine() *gin.Engine {
+	gin.SetMode(gin.TestMode)
+	r := gin.New()
+	r.Use(api.IdentityMiddleware(), api.CSRFProtection())
+	registerPublicRoutes(r)
+	registerAdminRoutes(r)
+	return r
+}
+
+func TestThemeSetAcceptsQueryAndJSONBody(t *testing.T) {
+	r := newFullTestEngine()
+	_, session := routerTestSession(t, "router-theme-set")
+	if err := accounts.MarkSessionMFAVerified(session); err != nil {
+		t.Fatalf("mark verified: %v", err)
+	}
+
+	send := func(target, body, site string) *httptest.ResponseRecorder {
+		req := httptest.NewRequest(http.MethodPost, target, strings.NewReader(body))
+		if body != "" {
+			req.Header.Set("Content-Type", "application/json")
+		}
+		req.Header.Set("Sec-Fetch-Site", site)
+		req.AddCookie(&http.Cookie{Name: "session_token", Value: session})
+		w := httptest.NewRecorder()
+		r.ServeHTTP(w, req)
+		return w
+	}
+
+	if w := send("/api/admin/theme/set?theme=default", "", "same-origin"); w.Code != http.StatusOK {
+		t.Fatalf("theme from query returned %d: %s", w.Code, w.Body.String())
+	}
+	if w := send("/api/admin/theme/set", `{"theme":"default"}`, "same-origin"); w.Code != http.StatusOK {
+		t.Fatalf("theme from JSON body returned %d: %s", w.Code, w.Body.String())
+	}
+	if w := send("/api/admin/theme/set", `{}`, "same-origin"); w.Code != http.StatusBadRequest {
+		t.Fatalf("missing theme returned %d: %s", w.Code, w.Body.String())
+	}
+	// 路由级 CSRF：cookie 会话的跨站写请求被拒绝。
+	if w := send("/api/admin/theme/set?theme=default", "", "cross-site"); w.Code != http.StatusForbidden {
+		t.Fatalf("cross-site theme change returned %d, want 403", w.Code)
+	}
+}
+
+func TestLogoutViaPOST(t *testing.T) {
+	r := newFullTestEngine()
+	_, session := routerTestSession(t, "router-logout")
+
+	req := httptest.NewRequest(http.MethodPost, "/api/logout", nil)
+	req.Header.Set("Sec-Fetch-Site", "same-origin")
+	req.AddCookie(&http.Cookie{Name: "session_token", Value: session})
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+	if w.Code != http.StatusFound {
+		t.Fatalf("POST /api/logout returned %d: %s", w.Code, w.Body.String())
+	}
+	if _, err := accounts.GetSession(session); err == nil {
+		t.Fatal("session survived logout")
+	}
+}
+
+func TestAnonymousCrossOriginRPCNotBlockedByCSRF(t *testing.T) {
+	r := newFullTestEngine()
+	req := httptest.NewRequest(http.MethodPost, "/api/rpc2", strings.NewReader(`{"jsonrpc":"2.0","id":1,"method":"public:getVersion"}`))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Origin", "https://third-party.example")
+	req.Header.Set("Sec-Fetch-Site", "cross-site")
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+	if w.Code == http.StatusForbidden {
+		t.Fatalf("anonymous cross-origin RPC was rejected: %s", w.Body.String())
+	}
+}
+
 // 备份下载与节点文件上传都能绕过 step-up（备份含 2FA 密钥，上传可写 crontab），
 // 必须挂敏感操作二次验证。
 func TestSensitiveRESTRoutesRequireStepUp(t *testing.T) {

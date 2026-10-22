@@ -104,9 +104,10 @@ func DeleteTheme(c *gin.Context) {
 	api.RespondSuccessMessage(c, "主题删除成功", nil)
 }
 
-// SetTheme 设置主题
+// SetTheme 设置主题。主题名可以放在查询参数 ?theme=、JSON 请求体 {"theme": ...}
+// 或表单字段 theme 中（GET 过渡期只有查询参数）。
 func SetTheme(c *gin.Context) {
-	themeName := c.Query("theme")
+	themeName := themeNameFromRequest(c)
 	if themeName == "" {
 		api.RespondError(c, http.StatusBadRequest, "主题名称不能为空")
 		return
@@ -134,6 +135,26 @@ func SetTheme(c *gin.Context) {
 	}
 
 	api.RespondSuccessMessage(c, "主题设置成功", gin.H{"theme": themeName})
+}
+
+// themeNameFromRequest 依次从查询参数、JSON 请求体、表单读取主题名。
+func themeNameFromRequest(c *gin.Context) string {
+	if name := strings.TrimSpace(c.Query("theme")); name != "" {
+		return name
+	}
+	if c.Request.Method == http.MethodGet || c.Request.Body == nil {
+		return ""
+	}
+	if strings.HasPrefix(strings.ToLower(c.ContentType()), "application/json") || c.ContentType() == "" {
+		var body struct {
+			Theme string `json:"theme"`
+		}
+		if err := json.NewDecoder(io.LimitReader(c.Request.Body, 64<<10)).Decode(&body); err == nil {
+			return strings.TrimSpace(body.Theme)
+		}
+		return ""
+	}
+	return strings.TrimSpace(c.PostForm("theme"))
 }
 
 // extractAndValidateTheme 解压并验证主题

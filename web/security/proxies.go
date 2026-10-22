@@ -74,7 +74,58 @@ func ApplyTrustedProxiesWithHeader(r *gin.Engine, raw, header string) error {
 		header = DefaultRemoteIPHeader
 	}
 	r.RemoteIPHeaders = []string{header}
-	return r.SetTrustedProxies(ParseTrustedProxies(raw))
+	entries := ParseTrustedProxies(raw)
+	if err := r.SetTrustedProxies(entries); err != nil {
+		return err
+	}
+	setTrustedProxyPrefixes(entries)
+	return nil
+}
+
+// trustedProxyPrefixes 是当前生效的受信代理网段，供 gin 之外需要判断"对端是否
+// 受信代理"的地方使用（例如 CSRF 校验是否采信 X-Forwarded-Host）。
+// 未调用 ApplyTrustedProxies 时使用 DefaultTrustedProxies。
+var trustedProxyPrefixes atomic.Pointer[[]netip.Prefix]
+
+func parseTrustedProxyPrefixes(entries []string) *[]netip.Prefix {
+	prefixes := make([]netip.Prefix, 0, len(entries))
+	for _, entry := range entries {
+		if prefix, err := parseTrustedProxyEntry(entry); err == nil {
+			prefixes = append(prefixes, prefix)
+		}
+	}
+	return &prefixes
+}
+
+func setTrustedProxyPrefixes(entries []string) {
+	trustedProxyPrefixes.Store(parseTrustedProxyPrefixes(entries))
+}
+
+// IsTrustedProxyPeer 报告请求的直接对端（RemoteAddr）是否在受信代理列表中。
+func IsTrustedProxyPeer(r *http.Request) bool {
+	if r == nil {
+		return false
+	}
+	host, _, err := net.SplitHostPort(strings.TrimSpace(r.RemoteAddr))
+	if err != nil {
+		host = strings.TrimSpace(r.RemoteAddr)
+	}
+	addr, err := netip.ParseAddr(host)
+	if err != nil {
+		return false
+	}
+	addr = addr.Unmap()
+	prefixes := trustedProxyPrefixes.Load()
+	if prefixes == nil {
+		trustedProxyPrefixes.CompareAndSwap(nil, parseTrustedProxyPrefixes(DefaultTrustedProxies))
+		prefixes = trustedProxyPrefixes.Load()
+	}
+	for _, prefix := range *prefixes {
+		if prefix.Contains(addr) {
+			return true
+		}
+	}
+	return false
 }
 
 // ProxyTrustWarner implements the startup self-check: the first time a request
