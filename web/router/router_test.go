@@ -1,16 +1,19 @@
 package router
 
 import (
+	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/gin-gonic/gin"
 	"github.com/komari-monitor/komari/cmd/flags"
 	"github.com/komari-monitor/komari/database/accounts"
 	"github.com/komari-monitor/komari/database/dbcore"
+	"github.com/komari-monitor/komari/database/models"
 	"github.com/komari-monitor/komari/web/api"
 )
 
@@ -68,6 +71,91 @@ func serveWithSession(r *gin.Engine, method, target, body, session string) *http
 	w := httptest.NewRecorder()
 	r.ServeHTTP(w, req)
 	return w
+}
+
+type twoFactorStatusBody struct {
+	Status string                     `json:"status"`
+	Data   map[string]json.RawMessage `json:"data"`
+}
+
+func readTwoFactorStatus(t *testing.T, r *gin.Engine, session string) (enabled bool, validUntil, window int64) {
+	t.Helper()
+	w := serveWithSession(r, http.MethodGet, "/api/admin/2fa/status", "", session)
+	if w.Code != http.StatusOK {
+		t.Fatalf("status returned %d: %s", w.Code, w.Body.String())
+	}
+	var body twoFactorStatusBody
+	if err := json.Unmarshal(w.Body.Bytes(), &body); err != nil {
+		t.Fatalf("decode %s: %v", w.Body.String(), err)
+	}
+	// 字段名是与前端的约定，必须一个不差。
+	for _, key := range []string{"enabled", "step_up_valid_until", "window_seconds"} {
+		if _, ok := body.Data[key]; !ok {
+			t.Fatalf("response is missing %q: %s", key, w.Body.String())
+		}
+	}
+	if len(body.Data) != 3 {
+		t.Fatalf("unexpected fields in %s", w.Body.String())
+	}
+	_ = json.Unmarshal(body.Data["enabled"], &enabled)
+	_ = json.Unmarshal(body.Data["step_up_valid_until"], &validUntil)
+	_ = json.Unmarshal(body.Data["window_seconds"], &window)
+	return enabled, validUntil, window
+}
+
+func TestTwoFactorStatusReportsStepUpWindow(t *testing.T) {
+	r := newAdminTestEngine()
+	_, session := routerTestSession(t, "router-2fa-status")
+
+	enabled, validUntil, window := readTwoFactorStatus(t, r, session)
+	if !enabled || validUntil != 0 || window != 600 {
+		t.Fatalf("before step-up: enabled=%v valid_until=%d window=%d", enabled, validUntil, window)
+	}
+
+	before := time.Now().Unix()
+	if err := accounts.MarkSessionMFAVerified(session); err != nil {
+		t.Fatalf("mark verified: %v", err)
+	}
+	_, validUntil, _ = readTwoFactorStatus(t, r, session)
+	if validUntil < before+600-1 || validUntil > time.Now().Unix()+600+1 {
+		t.Fatalf("valid_until = %d, want about %d", validUntil, before+600)
+	}
+
+	// 窗口过期后回到 0。
+	old := time.Now().UTC().Add(-11 * time.Minute)
+	if err := dbcore.GetDBInstance().Model(&models.Session{}).Where("session = ?", session).Update("mfa_verified_at", old).Error; err != nil {
+		t.Fatalf("backdate: %v", err)
+	}
+	_, validUntil, _ = readTwoFactorStatus(t, r, session)
+	if validUntil != 0 {
+		t.Fatalf("expired window reported valid_until = %d", validUntil)
+	}
+}
+
+func TestTwoFactorStatusWithout2FAAndUnauthenticated(t *testing.T) {
+	r := newAdminTestEngine()
+	user, err := accounts.CreateAccount("router-2fa-status-off", "Secret-password1")
+	if err != nil {
+		t.Fatalf("create account: %v", err)
+	}
+	t.Cleanup(func() {
+		_ = accounts.DeleteSessionsExcept(user.UUID, "")
+		_ = accounts.DeleteAccountByUsername("router-2fa-status-off")
+	})
+	session, err := accounts.CreateSession(user.UUID, 3600, "test", "127.0.0.1", "password")
+	if err != nil {
+		t.Fatalf("create session: %v", err)
+	}
+	enabled, validUntil, window := readTwoFactorStatus(t, r, session)
+	if enabled || validUntil != 0 || window != 600 {
+		t.Fatalf("without 2FA: enabled=%v valid_until=%d window=%d", enabled, validUntil, window)
+	}
+
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, httptest.NewRequest(http.MethodGet, "/api/admin/2fa/status", nil))
+	if w.Code != http.StatusUnauthorized {
+		t.Fatalf("anonymous status returned %d, want 401", w.Code)
+	}
 }
 
 // 备份下载与节点文件上传都能绕过 step-up（备份含 2FA 密钥，上传可写 crontab），

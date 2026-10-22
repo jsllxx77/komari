@@ -102,6 +102,33 @@ func VerifySensitive2FAFor(userUUID, sessionToken string, isAPIKey bool, code fu
 	return nil
 }
 
+// StepUpWindowSeconds 返回 step-up 窗口的长度（秒）。
+func StepUpWindowSeconds() int64 {
+	return int64(mfaStepUpWindow / time.Second)
+}
+
+// StepUpValidUntil 返回当前 cookie 会话 step-up 窗口的截止时间（Unix 秒）。
+// 不是 cookie 会话（API Key 等）、从未通过 2FA 或窗口已过期时返回 0。
+func StepUpValidUntil(c *gin.Context) int64 {
+	if _, isAPIKey := c.Get("api_key"); isAPIKey {
+		return 0
+	}
+	// IdentityMiddleware 只在 cookie 会话有效时写入 "session"。
+	session := c.GetString("session")
+	if session == "" {
+		return 0
+	}
+	verifiedAt, ok, err := accounts.SessionMFAVerifiedAt(session)
+	if err != nil || !ok {
+		return 0
+	}
+	until := verifiedAt.Add(mfaStepUpWindow)
+	if !time.Now().Before(until) {
+		return 0
+	}
+	return until.Unix()
+}
+
 // sessionToken 读取当前请求的会话令牌（cookie 认证场景）。
 func sessionToken(c *gin.Context) string {
 	session, err := c.Cookie("session_token")

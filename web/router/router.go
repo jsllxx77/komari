@@ -140,6 +140,8 @@ func registerAdminRoutes(r *gin.Engine) {
 		twoFactor.POST("/disable", api.RequireSensitive2FA(), admin.Disable2FA)
 		// 开启 step-up 窗口：通过后 10 分钟内调用敏感接口不再要求验证码。
 		twoFactor.POST("/verify", admin.Verify2FA)
+		// 查询 2FA 状态与当前会话的 step-up 窗口，不要求二次验证。
+		twoFactor.GET("/status", admin.Status2FA)
 	}
 
 	// oauth2 绑定走重定向，保留 REST handler。

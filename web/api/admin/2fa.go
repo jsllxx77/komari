@@ -113,6 +113,39 @@ func Disable2FA(c *gin.Context) {
 	api.RespondSuccess(c, "")
 }
 
+// twoFactorStatus 是 GET /api/admin/2fa/status 的返回体，字段名是与前端的约定。
+type twoFactorStatus struct {
+	// Enabled 表示当前账号是否已启用 2FA。
+	Enabled bool `json:"enabled"`
+	// StepUpValidUntil 是当前 cookie 会话 step-up 窗口的截止时间（Unix 秒），
+	// 没有有效窗口或不是 cookie 会话时为 0。
+	StepUpValidUntil int64 `json:"step_up_valid_until"`
+	// WindowSeconds 是一次 step-up 的有效时长（秒）。
+	WindowSeconds int64 `json:"window_seconds"`
+}
+
+// Status2FA 返回 2FA 启用状态与当前会话的 step-up 窗口，前端据此决定
+// 敏感操作前是否先弹出验证码输入框。
+func Status2FA(c *gin.Context) {
+	status := twoFactorStatus{WindowSeconds: api.StepUpWindowSeconds()}
+	if _, isAPIKey := c.Get("api_key"); !isAPIKey {
+		uuid := c.GetString("uuid")
+		if uuid == "" {
+			api.RespondError(c, http.StatusUnauthorized, "Unauthorized.")
+			return
+		}
+		user, err := accounts.GetUserByUUID(uuid)
+		if err != nil {
+			api.RespondError(c, http.StatusInternalServerError, "Failed to load account: "+err.Error())
+			return
+		}
+		status.Enabled = user.TwoFactor != ""
+		status.StepUpValidUntil = api.StepUpValidUntil(c)
+	}
+	c.Header("Cache-Control", "no-store")
+	api.RespondSuccess(c, status)
+}
+
 // Verify2FA 为当前会话开启一段 step-up 窗口：通过后 10 分钟内调用敏感管理
 // 接口不再要求验证码，避免每个操作都弹一次。
 func Verify2FA(c *gin.Context) {
