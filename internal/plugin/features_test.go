@@ -546,16 +546,21 @@ func TestResolvePublicFileRootPageExposesOnlyDeclaredFile(t *testing.T) {
 	}
 	defer func() { _ = SetEnabled("rootpub", false, false) }()
 
-	if _, err := ResolvePublicFile("rootpub", "index.html"); err != nil {
+	page, err := ResolvePublicFile("rootpub", "index.html")
+	if err != nil {
 		t.Fatalf("declared root public page must resolve: %v", err)
+	}
+	// 根目录请求映射到已声明为公开的 index.html，而不是目录本身。
+	for _, root := range []string{"", ".", "/"} {
+		full, err := ResolvePublicFile("rootpub", root)
+		if err != nil || full != page {
+			t.Fatalf("ResolvePublicFile(%q) = %q, %v; want the declared index.html", root, full, err)
+		}
 	}
 	for _, bad := range []string{
 		"komari-plugin.json", // manifest
 		"secret.js",          // same directory, not a declared page
 		"script.js",          // server-side entry script
-		"",                   // the plugin root itself
-		".",                  // the plugin root itself
-		"/",                  // the plugin root itself
 	} {
 		if full, err := ResolvePublicFile("rootpub", bad); err == nil {
 			t.Fatalf("ResolvePublicFile(%q) = %q, want an error", bad, full)
@@ -583,15 +588,23 @@ func TestResolvePublicFileSubdirectoryPageKeepsItsAssets(t *testing.T) {
 	}
 	defer func() { _ = SetEnabled("subpub", false, false) }()
 
-	if _, err := ResolvePublicFile("subpub", "public/index.html"); err != nil {
+	page, err := ResolvePublicFile("subpub", "public/index.html")
+	if err != nil {
 		t.Fatalf("public page must resolve: %v", err)
 	}
 	if _, err := ResolvePublicFile("subpub", "public/app.js"); err != nil {
 		t.Fatalf("sibling asset must resolve: %v", err)
 	}
+	// 页面目录请求映射到其中的 index.html。
+	for _, dir := range []string{"public", "public/"} {
+		full, err := ResolvePublicFile("subpub", dir)
+		if err != nil || full != page {
+			t.Fatalf("ResolvePublicFile(%q) = %q, %v; want public/index.html", dir, full, err)
+		}
+	}
 	for _, bad := range []string{
-		"public",             // the directory itself
-		"public/",            // the directory itself
+		"",                   // the plugin root: no public root page
+		"private",            // a non-public directory
 		"private/hidden.js",  // outside the public page directory
 		"komari-plugin.json", // manifest
 		"script.js",          // server-side entry script

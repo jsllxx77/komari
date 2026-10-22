@@ -627,8 +627,10 @@ func Manifest(short string) (models.Plugin, error) {
 // A public page stored in the plugin root exposes only that page file itself:
 // every other entry of the root directory (the manifest, the server-side entry
 // script, undeclared assets) stays private. The manifest and the entry script
-// are never served through this path, and directories are rejected so the
-// caller cannot fall back to a directory listing/redirect.
+// are never served through this path. The returned path is always a regular
+// file: a request for a directory (the plugin root "." or a page directory such
+// as "public") resolves to "<dir>/index.html" only when that exact file is
+// itself public, so the caller never lists or redirects a directory.
 func ResolvePublicFile(short, name string) (string, error) {
 	if !validShort(short) {
 		return "", fmt.Errorf("invalid plugin short %q", short)
@@ -641,11 +643,41 @@ func ResolvePublicFile(short, name string) (string, error) {
 		return "", err
 	}
 	name = filepath.Clean(strings.TrimPrefix(name, "/"))
-	if !filepath.IsLocal(name) {
+	if name != "." && !filepath.IsLocal(name) {
 		return "", fmt.Errorf("invalid plugin file path %q", name)
 	}
+	if name == "." {
+		name = "index.html"
+	} else if full, err := ResolveFile(short, name); err == nil {
+		if stat, err := os.Stat(full); err == nil && stat.IsDir() {
+			// 目录请求（例如 "public/"）只映射到该目录下的 index.html，
+			// 并且这个 index.html 本身必须是公开文件；不列目录、不跳转。
+			name = filepath.Join(name, "index.html")
+		}
+	}
+	if !publicFileAllowed(info, name) {
+		return "", fmt.Errorf("plugin page %q is not public", name)
+	}
+	full, err := ResolveFile(short, name)
+	if err != nil {
+		return "", err
+	}
+	stat, err := os.Stat(full)
+	if err != nil {
+		return "", err
+	}
+	if !stat.Mode().IsRegular() {
+		return "", fmt.Errorf("plugin path %q is not a regular file", name)
+	}
+	return full, nil
+}
+
+// publicFileAllowed 判断 name（已 Clean 的相对路径）是否属于某个公开 iframe 页面：
+// 根目录下的页面只公开它自己；子目录下的页面公开整个页面目录。
+// 清单文件与服务端入口脚本永远不公开。
+func publicFileAllowed(info models.Plugin, name string) bool {
 	if name == manifestFile || name == filepath.Clean(info.Entry) {
-		return "", fmt.Errorf("plugin file %q is not public", name)
+		return false
 	}
 	for _, page := range info.Pages {
 		if page.Visibility != models.PageVisibilityPublic || page.Type != models.PageTypeIframe {
@@ -655,26 +687,16 @@ func ResolvePublicFile(short, name string) (string, error) {
 		dir := filepath.Dir(file)
 		if dir == "." {
 			// Root-level page: only the page file itself is public.
-			if name != file {
-				continue
+			if name == file {
+				return true
 			}
-		} else if name != file && !strings.HasPrefix(name, dir+string(os.PathSeparator)) {
 			continue
 		}
-		full, err := ResolveFile(short, name)
-		if err != nil {
-			return "", err
+		if name == file || strings.HasPrefix(name, dir+string(os.PathSeparator)) {
+			return true
 		}
-		stat, err := os.Stat(full)
-		if err != nil {
-			return "", err
-		}
-		if stat.IsDir() {
-			return "", fmt.Errorf("plugin path %q is a directory", name)
-		}
-		return full, nil
 	}
-	return "", fmt.Errorf("plugin page %q is not public", name)
+	return false
 }
 
 // ResolveFile returns the absolute path of a file inside an installed plugin
