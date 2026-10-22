@@ -30,6 +30,7 @@ const (
 	DeadlineExceeded = -32011 // 超时
 	Aborted          = -32021 // 并发冲突/事务中断
 	OutOfRange       = -32022 // 数值/索引越界
+	RateLimited      = -32029 // 请求过于频繁（限速）
 	Unimplemented    = -32050 // 尚未实现
 	Unavailable      = -32051 // 依赖服务暂不可用
 	DataLoss         = -32052 // 不可恢复的数据丢失

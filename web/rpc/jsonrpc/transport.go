@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/gin-gonic/gin"
+	"github.com/gorilla/websocket"
 	"github.com/komari-monitor/komari/database/accounts"
 	"github.com/komari-monitor/komari/internal/config"
 	"github.com/komari-monitor/komari/pkg/rpc"
@@ -94,28 +95,62 @@ func serveWebSocket(c *gin.Context) {
 	}
 	defer conn.Close()
 
+	// 连接级 ctx：读循环结束（断开、超限关闭）时取消，方法里的 ctx.Err() 检查才有意义。
+	ctx, cancel := context.WithCancel(c.Request.Context())
+	defer cancel()
+
 	meta := buildContextMeta(c)
 	conn.GetConn().SetReadLimit(rpcBodyLimit(meta))
+	// 匿名连接每条消息都从按 IP 的令牌桶里扣一个令牌（与 HTTP 中间件共用）：
+	// 升级时只扣一次的话，一条连接就能无限速地发请求。
+	anonymous := meta == nil || meta.Principal == nil || meta.Principal.Type == rpc.PrincipalAnonymous
+	clientIP := c.ClientIP()
+	rejected := 0
 	for {
 		var req rpc.JsonRpcRequest
-		if err := conn.ReadJSON(&req); err != nil {
+		readErr := conn.ReadJSON(&req)
+		if readErr != nil {
 			var se *json.SyntaxError
 			var ute *json.UnmarshalTypeError
-			if errors.As(err, &se) || errors.As(err, &ute) {
-				conn.WriteJSON(rpc.ErrorResponse(nil, rpc.InvalidRequest, "bad request: "+err.Error(), nil))
+			if !errors.As(readErr, &se) && !errors.As(readErr, &ute) {
+				// 其它视为连接/IO 错误，结束循环
+				break
+			}
+		}
+		if anonymous {
+			if !anonRateLimiter.allow(clientIP, 1) {
+				rejected++
+				var id any
+				if readErr == nil {
+					id = req.ID
+				}
+				conn.WriteJSON(rpc.ErrorResponse(id, rpc.RateLimited, "rate limited", nil))
+				if rejected >= maxConsecutiveRateLimitedWSMessages {
+					// 持续超限的连接直接断开，不再为它解析消息。
+					_ = conn.WriteControl(websocket.CloseMessage,
+						websocket.FormatCloseMessage(websocket.ClosePolicyViolation, "rate limited"),
+						time.Now().Add(time.Second))
+					break
+				}
 				continue
 			}
-			// 其它视为连接/IO 错误，结束循环
-			break
+			rejected = 0
+		}
+		if readErr != nil {
+			conn.WriteJSON(rpc.ErrorResponse(nil, rpc.InvalidRequest, "bad request: "+readErr.Error(), nil))
+			continue
 		}
 		if jerr := req.Validate(); jerr != nil {
 			conn.WriteJSON(jerr.ResponseWithID(req.ID))
 			continue
 		}
 		// 同步写：SafeConn 内部有锁，串行写避免响应乱序与并发竞态。
-		conn.WriteJSON(dispatchWithSensitive(context.Background(), c, meta, &req))
+		conn.WriteJSON(dispatchWithSensitive(ctx, c, meta, &req))
 	}
 }
+
+// maxConsecutiveRateLimitedWSMessages 是匿名 WebSocket 连续被限速多少条消息后断开连接。
+const maxConsecutiveRateLimitedWSMessages = 20
 
 func servePost(c *gin.Context) {
 	meta := buildContextMeta(c)

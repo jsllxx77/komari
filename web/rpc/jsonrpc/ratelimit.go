@@ -7,6 +7,7 @@ package jsonrpc
 
 import (
 	"net/http"
+	"net/netip"
 	"sync"
 	"time"
 
@@ -43,25 +44,44 @@ var anonRateLimiter = &anonymousRateLimiter{
 	maxIPs:   10000,
 }
 
+// rateLimitKey 返回 IP 对应的限速桶键。IPv6 按 /64 分桶：同一用户通常拥有
+// 整个 /64，按 /128 分桶既挡不住单一来源，又很容易把桶表灌满。
+func rateLimitKey(ip string) string {
+	addr, err := netip.ParseAddr(ip)
+	if err != nil {
+		return ip
+	}
+	addr = addr.Unmap()
+	if addr.Is4() {
+		return addr.String()
+	}
+	prefix, err := addr.Prefix(64)
+	if err != nil {
+		return ip
+	}
+	return prefix.String()
+}
+
 // allow 消耗 n 个令牌；不足时返回 false。
 func (l *anonymousRateLimiter) allow(ip string, n int) bool {
 	if n <= 0 {
 		n = 1
 	}
+	key := rateLimitKey(ip)
 	l.mu.Lock()
 	defer l.mu.Unlock()
 
 	now := time.Now()
 	l.sweepLocked(now)
 
-	b := l.buckets[ip]
+	b := l.buckets[key]
 	if b == nil {
 		if len(l.buckets) >= l.maxIPs {
 			// 表满：不再给新地址单独开桶，统一走共享桶降速。
 			b = l.overflow
 		} else {
 			b = &tokenBucket{tokens: anonymousRPCBurst, last: now}
-			l.buckets[ip] = b
+			l.buckets[key] = b
 		}
 	}
 	// 按经过时间补充令牌。
