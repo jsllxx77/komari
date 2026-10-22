@@ -16,6 +16,9 @@ jobs:
 
       - name: Clone and build frontend
         uses: ./.github/actions/build-frontend
+        with:
+          repository: ${{ vars.KOMARI_WEB_REPOSITORY || 'https://github.com/komari-monitor/komari-web' }}
+          ref: ${{ vars.KOMARI_WEB_REF || '' }}
 
       - name: Set up Go
         uses: actions/setup-go@v5

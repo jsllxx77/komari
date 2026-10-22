@@ -36,7 +36,9 @@ jobs:
         uses: ./.github/actions/build-frontend
         with:
           artifact-name: komari-frontend
-          ref: ${{ inputs.frontend_ref }}
+          repository: ${{ vars.KOMARI_WEB_REPOSITORY || 'https://github.com/komari-monitor/komari-web' }}
+          # 手动指定的 frontend_ref 优先。
+          ref: ${{ inputs.frontend_ref || vars.KOMARI_WEB_REF || '' }}
 
   build-and-attach-binaries:
     needs: build-frontend

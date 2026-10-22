@@ -41,7 +41,9 @@ jobs:
         uses: ./.github/actions/build-frontend
         with:
           artifact-name: komari-frontend
-          ref: ${{ needs.resolve-release.outputs.frontend_ref }}
+          repository: ${{ vars.KOMARI_WEB_REPOSITORY || 'https://github.com/komari-monitor/komari-web' }}
+          # tag 形如 vX-fixN 时固定使用对应的前端 tag，否则使用仓库变量 KOMARI_WEB_REF（为空即默认分支）。
+          ref: ${{ needs.resolve-release.outputs.frontend_ref || vars.KOMARI_WEB_REF || '' }}
 
   build-and-attach-binaries:
     needs: build-frontend

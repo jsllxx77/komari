@@ -28,6 +28,8 @@ jobs:
         uses: ./.github/actions/build-frontend
         with:
           artifact-name: komari-frontend
+          repository: ${{ vars.KOMARI_WEB_REPOSITORY || 'https://github.com/komari-monitor/komari-web' }}
+          ref: ${{ vars.KOMARI_WEB_REF || '' }}
 
   build-docker-binaries:
     needs: build-frontend
