@@ -1,6 +1,7 @@
 package admin
 
 import (
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -174,6 +175,29 @@ func TestEnable2FAAcceptsLegacyQueryCode(t *testing.T) {
 				t.Fatalf("stored secret = %q, want the pending secret", user.TwoFactor)
 			}
 		})
+	}
+}
+
+// 启用 2FA 时用过的验证码不能紧接着再用于 step-up 或登录。
+func TestEnable2FACodeCannotBeReplayed(t *testing.T) {
+	uuid := setupTwoFATestUser(t, "totp-admin-enable-replay")
+	genCtx, _ := twoFATestContext(t, uuid, "/api/admin/2fa/generate", "")
+	Generate2FA(genCtx)
+	pending, _ := pending2FASecrets.Get(uuid)
+	pendingSecret, _ := pending.(string)
+	code, err := totp.GenerateCode(pendingSecret, time.Now().UTC())
+	if err != nil {
+		t.Fatalf("generate code: %v", err)
+	}
+
+	c, w := twoFATestContext(t, uuid, "/api/admin/2fa/enable", `{"2fa_code":"`+code+`"}`)
+	Enable2FA(c)
+	if w.Code != http.StatusOK {
+		t.Fatalf("enable returned %d: %s", w.Code, w.Body.String())
+	}
+	ok, err := accounts.Verify2FaStrict(uuid, code)
+	if ok || !errors.Is(err, accounts.Err2FAReplay) {
+		t.Fatalf("the enabling code was accepted again: ok=%v err=%v", ok, err)
 	}
 }
 

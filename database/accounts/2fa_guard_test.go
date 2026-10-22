@@ -87,13 +87,13 @@ func TestValidate2FACodeForSecret(t *testing.T) {
 	now := time.Now().UTC()
 	code := totpCode(t, testTOTPSecret, now)
 
-	ok, err := Validate2FACodeForSecret("pending-owner", testTOTPSecret, code)
+	_, ok, err := Validate2FACodeForSecret("pending-owner", testTOTPSecret, code)
 	if err != nil || !ok {
 		t.Fatalf("valid code rejected: ok=%v err=%v", ok, err)
 	}
 	t.Cleanup(func() { Forget2FAState("pending-owner") })
 
-	ok, err = Validate2FACodeForSecret("pending-owner", testTOTPSecret, "000000")
+	_, ok, err = Validate2FACodeForSecret("pending-owner", testTOTPSecret, "000000")
 	if ok {
 		t.Fatal("wrong code accepted for pending secret")
 	}
@@ -101,7 +101,7 @@ func TestValidate2FACodeForSecret(t *testing.T) {
 		t.Fatalf("unexpected error: %v", err)
 	}
 
-	if _, err := Validate2FACodeForSecret("pending-owner", "", code); err != nil {
+	if _, _, err := Validate2FACodeForSecret("pending-owner", "", code); err != nil {
 		t.Fatalf("empty secret should not error: %v", err)
 	}
 }
@@ -116,10 +116,10 @@ func TestEnable2FaIfDisabledRefusesOverwrite(t *testing.T) {
 		_ = DeleteAccountByUsername("totp-overwrite")
 	})
 
-	if err := Enable2FaIfDisabled(user.UUID, testTOTPSecret); err != nil {
+	if err := Enable2FaIfDisabled(user.UUID, testTOTPSecret, 0); err != nil {
 		t.Fatalf("first enable failed: %v", err)
 	}
-	if err := Enable2FaIfDisabled(user.UUID, "GEZDGNBVGY3TQOJQ"); !errors.Is(err, ErrTwoFactorAlreadyEnabled) {
+	if err := Enable2FaIfDisabled(user.UUID, "GEZDGNBVGY3TQOJQ", 0); !errors.Is(err, ErrTwoFactorAlreadyEnabled) {
 		t.Fatalf("overwriting an existing secret must fail, got %v", err)
 	}
 

@@ -82,7 +82,39 @@ func startPendingOAuth2FA(c *gin.Context, userUUID string) {
 	c.Redirect(http.StatusFound, oauth2FAPagePath)
 }
 
-// takePendingOAuthLogin 取出并锁定（失败计数需要修改）待验证记录。
+// oauth2FAVerify 是第二步实际使用的校验函数，测试会替换它来统计校验次数。
+var oauth2FAVerify = accounts.Verify2FaStrict
+
+// reservePendingOAuthAttempt 在同一把锁里取出待验证记录并预占一次尝试。
+// 名额用完的令牌直接作废并返回 exhausted=true：先占名额再校验，并发提交
+// 同一个令牌最多只会校验 oauth2FAMaxAttempts 次。
+func reservePendingOAuthAttempt(token string) (record *pendingOAuthLogin, exhausted bool) {
+	oauth2FAPendingMutex.Lock()
+	defer oauth2FAPendingMutex.Unlock()
+	record = takePendingOAuthLogin(token)
+	if record == nil {
+		return nil, false
+	}
+	if record.Attempts >= oauth2FAMaxAttempts {
+		oauth2FAPending.Delete(token)
+		return nil, true
+	}
+	record.Attempts++
+	return record, false
+}
+
+// consumePendingOAuthLogin 原子地删除待验证记录，记录仍存在时返回 true。
+func consumePendingOAuthLogin(token string) bool {
+	oauth2FAPendingMutex.Lock()
+	defer oauth2FAPendingMutex.Unlock()
+	if takePendingOAuthLogin(token) == nil {
+		return false
+	}
+	oauth2FAPending.Delete(token)
+	return true
+}
+
+// takePendingOAuthLogin 查找待验证记录（不修改）。
 func takePendingOAuthLogin(token string) *pendingOAuthLogin {
 	if token == "" {
 		return nil
@@ -137,7 +169,12 @@ func OAuth2FAForm(c *gin.Context) {
 // OAuth2FASubmit 校验验证码，成功后才创建会话。
 func OAuth2FASubmit(c *gin.Context) {
 	token, _ := c.Cookie(oauth2FACookie)
-	record := takePendingOAuthLogin(token)
+	record, exhausted := reservePendingOAuthAttempt(token)
+	if exhausted {
+		dropPendingOAuthLogin(c, token)
+		renderOAuth2FAForm(c, http.StatusBadRequest, "Too many failed attempts. Please sign in again.")
+		return
+	}
 	if record == nil {
 		dropPendingOAuthLogin(c, token)
 		renderOAuth2FAForm(c, http.StatusBadRequest, "This login attempt has expired. Please sign in again.")
@@ -149,20 +186,16 @@ func OAuth2FASubmit(c *gin.Context) {
 		code = api.TwoFactorCodeFromRequest(c)
 	}
 
-	ok, err := accounts.Verify2FaStrict(record.UserUUID, code)
+	ok, err := oauth2FAVerify(record.UserUUID, code)
 	if errors.Is(err, accounts.ErrTooMany2FAAttempts) {
 		dropPendingOAuthLogin(c, token)
 		auditlog.Log(c.ClientIP(), record.UserUUID, "OAuth 2FA blocked: too many attempts", "warn")
 		renderOAuth2FAForm(c, http.StatusTooManyRequests, "Too many failed attempts. Please sign in again later.")
 		return
 	}
-	if err != nil {
-		renderOAuth2FAForm(c, http.StatusBadRequest, "Invalid 2FA code.")
-		return
-	}
-	if !ok {
+	if err != nil || !ok {
+		// 本次尝试已在 reservePendingOAuthAttempt 里计入。
 		oauth2FAPendingMutex.Lock()
-		record.Attempts++
 		attempts := record.Attempts
 		oauth2FAPendingMutex.Unlock()
 		auditlog.Log(c.ClientIP(), record.UserUUID, "OAuth 2FA failed", "warn")
@@ -175,6 +208,12 @@ func OAuth2FASubmit(c *gin.Context) {
 		return
 	}
 
+	// 令牌只能换一次会话：并发提交时只有第一个成功取走令牌的请求能登录。
+	if !consumePendingOAuthLogin(token) {
+		dropPendingOAuthLogin(c, token)
+		renderOAuth2FAForm(c, http.StatusBadRequest, "This login attempt has expired. Please sign in again.")
+		return
+	}
 	dropPendingOAuthLogin(c, token)
 
 	session, err := accounts.CreateSession(record.UserUUID, sessionCookieMaxAge, c.Request.UserAgent(), c.ClientIP(), oauth2FASessionMethod)

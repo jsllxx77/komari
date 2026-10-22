@@ -5,6 +5,8 @@ import (
 	"net/http/httptest"
 	"net/url"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -148,6 +150,69 @@ func TestOAuth2FAInvalidatesAfterTooManyAttempts(t *testing.T) {
 	OAuth2FASubmit(afterCtx)
 	if hasSessionCookie(afterRec) {
 		t.Fatal("pending token survived more than the allowed number of failures")
+	}
+}
+
+// 并发提交同一个待验证令牌：最多校验 oauth2FAMaxAttempts 次，之后令牌作废。
+func TestOAuth2FAConcurrentAttemptsAreBounded(t *testing.T) {
+	uuid := oauthTestUser(t, "oauth-2fa-concurrent")
+	if err := accounts.Enable2Fa(uuid, oauthTestTOTPSecret); err != nil {
+		t.Fatalf("enable 2fa: %v", err)
+	}
+
+	var evaluated int64
+	original := oauth2FAVerify
+	oauth2FAVerify = func(userUUID, code string) (bool, error) {
+		atomic.AddInt64(&evaluated, 1)
+		time.Sleep(20 * time.Millisecond)
+		return false, nil
+	}
+	t.Cleanup(func() { oauth2FAVerify = original })
+
+	startCtx, startRec := newOAuthContext(t, http.MethodGet, oauth2FAPagePath, "")
+	startPendingOAuth2FA(startCtx, uuid)
+	cookie := pendingCookie(t, startRec)
+
+	var wg sync.WaitGroup
+	start := make(chan struct{})
+	var sessions int64
+	for i := 0; i < 100; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			<-start
+			ctx, rec := newOAuthContext(t, http.MethodPost, oauth2FAPagePath, url.Values{"code": {"000000"}}.Encode())
+			ctx.Request.AddCookie(cookie)
+			OAuth2FASubmit(ctx)
+			if hasSessionCookie(rec) {
+				atomic.AddInt64(&sessions, 1)
+			}
+		}()
+	}
+	close(start)
+	wg.Wait()
+
+	if sessions != 0 {
+		t.Fatalf("%d wrong codes created a session", sessions)
+	}
+	if got := atomic.LoadInt64(&evaluated); got > oauth2FAMaxAttempts {
+		t.Fatalf("%d concurrent attempts were evaluated, want at most %d", got, oauth2FAMaxAttempts)
+	}
+	if _, ok := oauth2FAPending.Get(cookie.Value); ok {
+		t.Fatal("pending token survived after the attempt limit was reached")
+	}
+
+	// 令牌作废后正确的验证码也不能登录。
+	oauth2FAVerify = original
+	code, err := totp.GenerateCode(oauthTestTOTPSecret, time.Now().UTC())
+	if err != nil {
+		t.Fatalf("generate code: %v", err)
+	}
+	ctx, rec := newOAuthContext(t, http.MethodPost, oauth2FAPagePath, url.Values{"code": {code}}.Encode())
+	ctx.Request.AddCookie(cookie)
+	OAuth2FASubmit(ctx)
+	if hasSessionCookie(rec) {
+		t.Fatal("an invalidated pending token still created a session")
 	}
 }
 

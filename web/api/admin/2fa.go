@@ -64,7 +64,7 @@ func Enable2FA(c *gin.Context) {
 		return
 	}
 
-	valid, err := accounts.Validate2FACodeForSecret(uuid, secret, code)
+	usedStep, valid, err := accounts.Validate2FACodeForSecret(uuid, secret, code)
 	if errors.Is(err, accounts.ErrTooMany2FAAttempts) {
 		api.RespondError(c, http.StatusTooManyRequests, err.Error())
 		return
@@ -78,7 +78,8 @@ func Enable2FA(c *gin.Context) {
 		return
 	}
 
-	if err := accounts.Enable2FaIfDisabled(uuid, secret); err != nil {
+	// 把启用时用过的时间窗记为已使用，这个验证码不能紧接着再用于登录或敏感操作。
+	if err := accounts.Enable2FaIfDisabled(uuid, secret, usedStep); err != nil {
 		if errors.Is(err, accounts.ErrTwoFactorAlreadyEnabled) {
 			api.RespondError(c, http.StatusConflict, "2FA is already enabled")
 			return

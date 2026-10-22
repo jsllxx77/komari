@@ -38,7 +38,9 @@ func Enable2Fa(uuid, secret string) error {
 
 // Enable2FaIfDisabled 只在用户尚未启用 2FA 时写入密钥，避免覆盖已有密钥。
 // 返回 ErrTwoFactorAlreadyEnabled 表示该账号已经启用了 2FA。
-func Enable2FaIfDisabled(uuid, secret string) error {
+// usedStep 是启用时校验通过的时间窗（Validate2FACodeForSecret 的返回值），
+// 大于 0 时会被记为已使用，同一个验证码不能在启用后马上再用一次。
+func Enable2FaIfDisabled(uuid, secret string, usedStep int64) error {
 	db := dbcore.GetDBInstance()
 	result := db.Model(&models.User{}).
 		Where("uuid = ? AND (two_factor IS NULL OR two_factor = '')", uuid).
@@ -49,7 +51,7 @@ func Enable2FaIfDisabled(uuid, secret string) error {
 	if result.RowsAffected == 0 {
 		return ErrTwoFactorAlreadyEnabled
 	}
-	Forget2FAState(uuid)
+	forget2FAStateWithUsedStep(uuid, usedStep)
 	return nil
 }
 
