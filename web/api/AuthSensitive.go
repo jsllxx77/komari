@@ -125,16 +125,30 @@ func VerifySensitive2FA(c *gin.Context) error {
 	return VerifySensitive2FAFor(uuid, sessionToken(c), isAPIKey, func() string { return get2FACode(c) })
 }
 
+// twoFactorBodyKeys 是请求体里可以携带验证码的字段名。
+var twoFactorBodyKeys = []string{"2fa_code", "two_factor_code", "otp"}
+
 // TwoFactorCodeFromRequest 从请求头或请求体读取验证码，不接受查询参数。
-// 供不经过敏感操作中间件的接口（例如启用 2FA）使用。
+// 供不经过敏感操作中间件的接口（例如 step-up 验证）使用。
 func TwoFactorCodeFromRequest(c *gin.Context) string {
-	if code := c.GetHeader("X-2FA-Code"); code != "" {
+	if code := twoFactorCodeFromHeader(c); code != "" {
 		return code
 	}
-	if code := c.GetHeader("X-Two-Factor-Code"); code != "" {
+	return twoFactorCodeFromBody(c, twoFactorBodyKeys...)
+}
+
+// TwoFactorCodeForEnable 读取启用 2FA 时提交的验证码。
+// 依次查找请求头、请求体（额外接受 code 字段）；都没有时，过渡期内回退到
+// URL 查询参数 code / 2fa_code —— 官方前端仍用 /api/admin/2fa/enable?code=...。
+// 查询参数与敏感操作中间件共用 allowQueryTwoFactorCode 开关和弃用告警。
+func TwoFactorCodeForEnable(c *gin.Context) string {
+	if code := twoFactorCodeFromHeader(c); code != "" {
 		return code
 	}
-	return twoFactorCodeFromBody(c)
+	if code := twoFactorCodeFromBody(c, "2fa_code", "two_factor_code", "otp", "code"); code != "" {
+		return code
+	}
+	return twoFactorCodeFromQuery(c, "code", "2fa_code")
 }
 
 func get2FACode(c *gin.Context) string {
@@ -143,28 +157,42 @@ func get2FACode(c *gin.Context) string {
 			return codeString
 		}
 	}
+	if code := twoFactorCodeFromHeader(c); code != "" {
+		return code
+	}
+	if code := twoFactorCodeFromQuery(c, twoFactorBodyKeys...); code != "" {
+		return code
+	}
+	return twoFactorCodeFromBody(c, twoFactorBodyKeys...)
+}
+
+func twoFactorCodeFromHeader(c *gin.Context) string {
 	if code := c.GetHeader("X-2FA-Code"); code != "" {
 		return code
 	}
-	if code := c.GetHeader("X-Two-Factor-Code"); code != "" {
-		return code
-	}
-	if allowQueryTwoFactorCode {
-		for _, key := range []string{"2fa_code", "two_factor_code", "otp"} {
-			if code := c.Query(key); code != "" {
-				query2FADeprecationOnce.Do(func() {
-					logger.Warnf("auth", "2FA code from the URL query is deprecated and will be rejected in a future release; send X-2FA-Code or 2fa_code in the body instead")
-				})
-				return code
-			}
-		}
-	}
-	return twoFactorCodeFromBody(c)
+	return c.GetHeader("X-Two-Factor-Code")
 }
 
-// twoFactorCodeFromBody 从 JSON 请求体中读取验证码。
+// twoFactorCodeFromQuery 在 allowQueryTwoFactorCode 打开时从 URL 查询参数取码，
+// 并只打印一次弃用告警。
+func twoFactorCodeFromQuery(c *gin.Context, keys ...string) string {
+	if !allowQueryTwoFactorCode {
+		return ""
+	}
+	for _, key := range keys {
+		if code := c.Query(key); code != "" {
+			query2FADeprecationOnce.Do(func() {
+				logger.Warnf("auth", "2FA code from the URL query is deprecated and will be rejected in a future release; send X-2FA-Code or 2fa_code in the body instead")
+			})
+			return code
+		}
+	}
+	return ""
+}
+
+// twoFactorCodeFromBody 从 JSON 请求体中按 keys 的顺序读取验证码。
 // 预读有上限的前缀，再把未读部分拼回去，保证下游 handler 仍能读到完整请求体。
-func twoFactorCodeFromBody(c *gin.Context) string {
+func twoFactorCodeFromBody(c *gin.Context, keys ...string) string {
 	if c.Request.Body == nil || c.Request.Method == http.MethodGet {
 		return ""
 	}
@@ -178,7 +206,7 @@ func twoFactorCodeFromBody(c *gin.Context) string {
 	if err := json.Unmarshal(prefix, &body); err != nil {
 		return ""
 	}
-	for _, key := range []string{"2fa_code", "two_factor_code", "otp"} {
+	for _, key := range keys {
 		if value, ok := body[key].(string); ok && value != "" {
 			return value
 		}

@@ -83,11 +83,23 @@ func TestEnable2FAIgnoresClientSuppliedSecret(t *testing.T) {
 	if err != nil {
 		t.Fatalf("generate attacker code: %v", err)
 	}
-	c, w := twoFATestContext(t, uuid, "/api/admin/2fa/enable?code="+attackerCode, "")
-	c.Request.AddCookie(&http.Cookie{Name: "2fa_secret", Value: attackerSecret})
-	Enable2FA(c)
-	if w.Code != http.StatusBadRequest {
-		t.Fatalf("enable with a client-supplied secret returned %d, want 400", w.Code)
+	// 验证码分别放在请求体和请求头里，确保请求确实走到了校验这一步：
+	// 只有"伪造的 cookie 被忽略、按服务端密钥校验"才会得到 Invalid 2FA code。
+	bodies := []string{`{"2fa_code":"` + attackerCode + `"}`, ""}
+	headers := []string{"", attackerCode}
+	for i := range bodies {
+		c, w := twoFATestContext(t, uuid, "/api/admin/2fa/enable", bodies[i])
+		c.Request.AddCookie(&http.Cookie{Name: "2fa_secret", Value: attackerSecret})
+		if headers[i] != "" {
+			c.Request.Header.Set("X-2FA-Code", headers[i])
+		}
+		Enable2FA(c)
+		if w.Code != http.StatusBadRequest {
+			t.Fatalf("attempt %d: enable with a client-supplied secret returned %d, want 400", i, w.Code)
+		}
+		if !strings.Contains(w.Body.String(), "Invalid 2FA code") {
+			t.Fatalf("attempt %d: forged secret was not rejected by code validation: %s", i, w.Body.String())
+		}
 	}
 
 	user, err := accounts.GetUserByUUID(uuid)
@@ -117,6 +129,51 @@ func TestEnable2FAIgnoresClientSuppliedSecret(t *testing.T) {
 	}
 	if _, ok := pending2FASecrets.Get(uuid); ok {
 		t.Fatal("pending secret was not cleared after a successful enable")
+	}
+}
+
+// 官方前端仍用 /api/admin/2fa/enable?code=...，过渡期内必须能启用 2FA。
+func TestEnable2FAAcceptsLegacyQueryCode(t *testing.T) {
+	for _, tc := range []struct {
+		name, query, body string
+	}{
+		{name: "query code", query: "code"},
+		{name: "query 2fa_code", query: "2fa_code"},
+		{name: "body code", body: "code"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			uuid := setupTwoFATestUser(t, "totp-admin-legacy-"+strings.ReplaceAll(tc.name, " ", "-"))
+			genCtx, genRec := twoFATestContext(t, uuid, "/api/admin/2fa/generate", "")
+			Generate2FA(genCtx)
+			if genRec.Code != http.StatusOK {
+				t.Fatalf("generate returned %d", genRec.Code)
+			}
+			pending, _ := pending2FASecrets.Get(uuid)
+			pendingSecret, _ := pending.(string)
+			code, err := totp.GenerateCode(pendingSecret, time.Now().UTC())
+			if err != nil {
+				t.Fatalf("generate code: %v", err)
+			}
+
+			target, body := "/api/admin/2fa/enable", ""
+			if tc.query != "" {
+				target += "?" + tc.query + "=" + code
+			} else {
+				body = `{"` + tc.body + `":"` + code + `"}`
+			}
+			c, w := twoFATestContext(t, uuid, target, body)
+			Enable2FA(c)
+			if w.Code != http.StatusOK {
+				t.Fatalf("enable returned %d: %s", w.Code, w.Body.String())
+			}
+			user, err := accounts.GetUserByUUID(uuid)
+			if err != nil {
+				t.Fatalf("load user: %v", err)
+			}
+			if user.TwoFactor != pendingSecret {
+				t.Fatalf("stored secret = %q, want the pending secret", user.TwoFactor)
+			}
+		})
 	}
 }
 

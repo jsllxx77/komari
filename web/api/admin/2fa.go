@@ -58,7 +58,7 @@ func Enable2FA(c *gin.Context) {
 		return
 	}
 	secret, _ := value.(string)
-	code := api.TwoFactorCodeFromRequest(c)
+	code := api.TwoFactorCodeForEnable(c)
 	if code == "" {
 		api.RespondError(c, http.StatusBadRequest, "2FA code is required")
 		return
