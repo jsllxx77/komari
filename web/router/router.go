@@ -94,7 +94,8 @@ func registerAdminRoutes(r *gin.Engine) {
 	admin.RegisterPprofRoutes(g)
 
 	// --- 二进制/流/重定向类，保留 REST handler ---
-	g.GET("/download/backup", admin.DownloadBackup)
+	// 备份是整库导出（含 api_key 明文与 2FA 密钥），拿到它就能绕过 step-up，要求二次验证。
+	g.GET("/download/backup", api.RequireSensitive2FA(), admin.DownloadBackup)
 	// 备份/主题/插件归档上传会整库替换或写入服务端代码，统一要求敏感操作二次验证。
 	uploadHandler := admin.NewArchiveUploadHandler()
 	uploadGroup := g.Group("/upload", api.RequireSensitive2FA())
@@ -193,7 +194,8 @@ func registerAdminRoutes(r *gin.Engine) {
 		// requests are authenticated against the existing session owner so a short
 		// network flap does not depend on the current TOTP window.
 		clientGroup.GET("/:uuid/terminal", terminal.RequestTerminal)
-		clientGroup.POST("/:uuid/file/upload", filemanager.Upload)
+		// 往节点写文件（例如 crontab）等同于执行代码，与 admin:exec 一样要求二次验证。
+		clientGroup.POST("/:uuid/file/upload", api.RequireSensitive2FA(), filemanager.Upload)
 		clientGroup.GET("/:uuid/file/download", filemanager.Download)
 		clientGroup.HEAD("/:uuid/file/download", filemanager.Download)
 		clientGroup.GET("/:uuid/file/preview-token", filemanager.CreatePreviewToken)

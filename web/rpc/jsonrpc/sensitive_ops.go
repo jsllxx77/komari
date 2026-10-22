@@ -32,9 +32,8 @@ func init() {
 		"admin:setPluginConfiguration",
 		// 账号与认证
 		"admin:setOidcProvider",
-		// 密钥与会话读取
+		// 密钥读取（getSessions 已不再返回明文会话令牌，不再列为敏感）
 		"admin:getClientToken",
-		"admin:getSessions",
 		"admin:revealSecret",
 	}
 	for _, method := range sensitiveAdminMethods {
