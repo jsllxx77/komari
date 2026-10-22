@@ -36,6 +36,9 @@ type ContextMeta struct {
 	UserAgent string
 	// TempShareValid 临时分享访问许可是否有效（基于 temp_key cookie 校验，由传输层填充）
 	TempShareValid bool
+	// TwoFACode 请求头（X-2FA-Code / X-Two-Factor-Code）携带的 2FA 验证码，由传输层填充。
+	// 供"按内容决定是否敏感"的方法（如 admin:editSettings）在参数里没有验证码时使用。
+	TwoFACode string
 }
 
 // 私有类型做 key，避免外部冲突

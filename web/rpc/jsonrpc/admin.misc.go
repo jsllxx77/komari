@@ -4,11 +4,14 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"math"
+	"reflect"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/komari-monitor/komari/database/accounts"
@@ -253,23 +256,99 @@ func maskSecretSettings(settings map[string]interface{}) map[string]interface{} 
 }
 
 // stripMaskedSecrets 丢弃仍然是打码值的密钥字段：前端把打码值原样提交回来时，
-// 不应把真正的密钥覆盖成 "****1234"。
+// 不应把真正的密钥覆盖成 "****1234"。空字符串是"清空密钥"，必须照常写入
+// （设置页清空 API key 时提交的就是 api_key: ""）。
 func stripMaskedSecrets(cfg map[string]interface{}) {
 	for key := range secretSettingKeys {
 		value, ok := cfg[key].(string)
 		if !ok {
 			continue
 		}
-		if value == "" || strings.HasPrefix(value, maskedSecretPlaceholder) {
+		if value != "" && strings.HasPrefix(value, maskedSecretPlaceholder) {
 			delete(cfg, key)
 		}
 	}
 }
 
-// sensitiveSettingsTouched 判断本次设置变更是否涉及安全相关键。
-func sensitiveSettingsTouched(cfg map[string]interface{}) bool {
-	for key := range cfg {
-		if _, ok := sensitiveSettingKeys[key]; ok {
+// twoFactorParamKeys 是参数里可以携带验证码的字段名。它们只用于校验，
+// 保存设置前必须全部删除，不能被当成配置项写进库。
+var twoFactorParamKeys = []string{"2fa_code", "two_factor_code", "otp"}
+
+// takeSettingsTwoFactorCode 取出并删除参数里的验证码；参数里没有时使用
+// 请求头（X-2FA-Code / X-Two-Factor-Code，由传输层放进 meta）里的验证码。
+func takeSettingsTwoFactorCode(ctx context.Context, cfg map[string]interface{}) string {
+	code := ""
+	for _, key := range twoFactorParamKeys {
+		if value, ok := cfg[key].(string); ok && value != "" && code == "" {
+			code = value
+		}
+		delete(cfg, key)
+	}
+	if code == "" {
+		if meta := rpc.MetaFromContext(ctx); meta != nil {
+			code = meta.TwoFACode
+		}
+	}
+	return code
+}
+
+// settingDefaults 是 config.Settings 上 default 标签给出的默认值（已按 JSON
+// 解码后的形态表示），用于在库里还没有某个键时判断提交值是否真的改变了配置。
+var settingDefaults = sync.OnceValue(func() map[string]any {
+	out := make(map[string]any)
+	t := reflect.TypeOf(config.Settings{})
+	for i := 0; i < t.NumField(); i++ {
+		field := t.Field(i)
+		name, _, _ := strings.Cut(field.Tag.Get("json"), ",")
+		def, ok := field.Tag.Lookup("default")
+		if name == "" || name == "-" || !ok {
+			continue
+		}
+		switch field.Type.Kind() {
+		case reflect.Bool:
+			if v, err := strconv.ParseBool(def); err == nil {
+				out[name] = v
+			}
+		case reflect.String:
+			out[name] = def
+		case reflect.Int, reflect.Int8, reflect.Int16, reflect.Int32, reflect.Int64,
+			reflect.Uint, reflect.Uint8, reflect.Uint16, reflect.Uint32, reflect.Uint64,
+			reflect.Float32, reflect.Float64:
+			if v, err := strconv.ParseFloat(def, 64); err == nil {
+				out[name] = v
+			}
+		}
+	}
+	return out
+})
+
+// normalizeSettingValue 把值按 JSON 往返一次，使提交值与库里解码出的值可以直接比较。
+func normalizeSettingValue(value any) any {
+	raw, err := json.Marshal(value)
+	if err != nil {
+		return value
+	}
+	var out any
+	if err := json.Unmarshal(raw, &out); err != nil {
+		return value
+	}
+	return out
+}
+
+// sensitiveSettingsChanged 判断本次提交是否真的修改了安全相关键。
+// current 是库里现有的配置（config.GetAll 的结果），库里没有的键按默认值比较。
+// 值与现有值相同不算修改：前端保存整张表单时，只改站点名不应要求 2FA。
+// 打码占位值已在 stripMaskedSecrets 中删除，等同于未修改。
+func sensitiveSettingsChanged(cfg, current map[string]interface{}) bool {
+	for key, value := range cfg {
+		if _, ok := sensitiveSettingKeys[key]; !ok {
+			continue
+		}
+		existing, ok := current[key]
+		if !ok {
+			existing, ok = settingDefaults()[key]
+		}
+		if !ok || !reflect.DeepEqual(normalizeSettingValue(value), normalizeSettingValue(existing)) {
 			return true
 		}
 	}
@@ -328,13 +407,16 @@ func adminEditSettings(ctx context.Context, req *rpc.JsonRpcRequest) (any, *rpc.
 		return nil, rpc.MakeError(rpc.InvalidParams, "Invalid or missing request body: "+err.Error(), nil)
 	}
 
-	// 打码后的密钥原样回传时不能覆盖真实值；2fa_code 只是校验用的临时字段。
+	// 打码后的密钥原样回传时不能覆盖真实值；验证码字段只是校验用的临时字段。
 	stripMaskedSecrets(cfg)
-	twoFACode, _ := cfg["2fa_code"].(string)
-	delete(cfg, "2fa_code")
+	twoFACode := takeSettingsTwoFactorCode(ctx, cfg)
 
-	// 涉及认证/授权/注入的配置项需要敏感操作二次验证（或 10 分钟内的 step-up 窗口）。
-	if sensitiveSettingsTouched(cfg) {
+	// 真正修改了认证/授权/注入相关配置时，需要敏感操作二次验证（或 10 分钟内的 step-up 窗口）。
+	current, err := config.GetAll()
+	if err != nil {
+		return nil, rpc.MakeError(rpc.InternalError, "Failed to get settings: "+err.Error(), nil)
+	}
+	if sensitiveSettingsChanged(cfg, current) {
 		if err := api.RequireSensitive2FAFromContext(ctx, twoFACode); err != nil {
 			return nil, rpc.MakeError(rpc.PermissionDenied, err.Error(), nil)
 		}

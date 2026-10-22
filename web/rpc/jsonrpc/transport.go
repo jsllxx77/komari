@@ -229,6 +229,8 @@ func buildContextMeta(c *gin.Context) *rpc.ContextMeta {
 
 	// 临时分享访问许可。
 	meta.TempShareValid = hasTempShareAccess(c)
+	// 请求头里的 2FA 验证码（REST 路由桥场景，例如保存设置时带 X-2FA-Code）。
+	meta.TwoFACode = headerTwoFACode(c)
 	return meta
 }
 
