@@ -164,6 +164,12 @@ func Verify2FA(c *gin.Context) {
 		api.RespondError(c, http.StatusTooManyRequests, err.Error())
 		return
 	}
+	if errors.Is(err, accounts.Err2FAReplay) {
+		// 同一时间窗的验证码已经用过：属于用户输入问题，不是服务端错误。
+		auditlog.Log(c.ClientIP(), uuid, "sensitive operation 2FA replay rejected", "warn")
+		api.RespondError(c, http.StatusUnauthorized, err.Error())
+		return
+	}
 	if err != nil {
 		api.RespondError(c, http.StatusInternalServerError, "Failed to verify 2FA code: "+err.Error())
 		return

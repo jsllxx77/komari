@@ -201,6 +201,34 @@ func TestEnable2FACodeCannotBeReplayed(t *testing.T) {
 	}
 }
 
+// 重复提交同一个验证码开 step-up 窗口属于用户输入问题，应返回 401 而不是 500。
+func TestVerify2FAReplayIsUnauthorized(t *testing.T) {
+	uuid := setupTwoFATestUser(t, "totp-admin-verify-replay")
+	const secret = "JBSWY3DPEHPK3PXPJBSWY3DPEHPK3PXP"
+	if err := accounts.Enable2Fa(uuid, secret); err != nil {
+		t.Fatalf("enable 2fa: %v", err)
+	}
+	code, err := totp.GenerateCode(secret, time.Now().UTC())
+	if err != nil {
+		t.Fatalf("generate code: %v", err)
+	}
+
+	first, firstRec := twoFATestContext(t, uuid, "/api/admin/2fa/verify", `{"2fa_code":"`+code+`"}`)
+	Verify2FA(first)
+	if firstRec.Code != http.StatusOK {
+		t.Fatalf("first verify returned %d: %s", firstRec.Code, firstRec.Body.String())
+	}
+
+	second, secondRec := twoFATestContext(t, uuid, "/api/admin/2fa/verify", `{"2fa_code":"`+code+`"}`)
+	Verify2FA(second)
+	if secondRec.Code != http.StatusUnauthorized {
+		t.Fatalf("replayed verify returned %d, want 401: %s", secondRec.Code, secondRec.Body.String())
+	}
+	if !strings.Contains(secondRec.Body.String(), accounts.Err2FAReplay.Error()) {
+		t.Fatalf("replayed verify body = %s, want the replay message", secondRec.Body.String())
+	}
+}
+
 func TestEnable2FARejectsWrongCode(t *testing.T) {
 	uuid := setupTwoFATestUser(t, "totp-admin-wrong")
 
