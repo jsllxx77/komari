@@ -122,6 +122,21 @@ jobs:
           name: komari-${{ matrix.goos }}-${{ matrix.goarch }}
           path: komari-${{ matrix.goos }}-${{ matrix.goarch }}${{ matrix.binary_extension }}
 
+  attach-checksums:
+    # 二进制用 --clobber 覆盖后必须重新生成 SHA256SUMS，否则安装脚本会判定为篡改。
+    needs: build-and-attach-binaries
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout workflow source
+        uses: actions/checkout@v4
+
+      - name: Attach SHA256SUMS
+        uses: ./.github/actions/attach-checksums
+        with:
+          tag: ${{ inputs.release_tag }}
+          github-token: ${{ github.token }}
+
   build-and-push-docker:
     needs: build-and-attach-binaries
     runs-on: ubuntu-latest

@@ -540,6 +540,22 @@ msg() {
             en_text='Checksum verification failed. The binary may be corrupted or tampered with. Aborting installation.'
             zh_text='校验失败，二进制文件可能已损坏或被篡改，已中止安装。'
             ;;
+        checksums_no_tool)
+            en_text='No SHA-256 tool found (sha256sum, shasum or openssl). Install coreutils, perl (shasum) or openssl, or rerun with --insecure-skip-verify to skip verification (NOT recommended). Aborting installation.'
+            zh_text='未找到 SHA-256 校验工具（sha256sum、shasum 或 openssl）。请安装 coreutils、perl（shasum）或 openssl，或使用 --insecure-skip-verify 跳过校验（不推荐）。已中止安装。'
+            ;;
+        fetch_latest)
+            en_text='Resolving the latest stable release...'
+            zh_text='正在获取最新正式版本...'
+            ;;
+        latest_not_found)
+            en_text='Could not determine the latest stable release.'
+            zh_text='无法确定最新正式版本。'
+            ;;
+        latest_found)
+            en_text='Latest stable release: %s'
+            zh_text='最新正式版本：%s'
+            ;;
         checksums_skip_warn)
             en_text='Warning: --insecure-skip-verify is set. Skipping integrity verification.'
             zh_text='警告：已启用 --insecure-skip-verify，跳过完整性校验。'
@@ -912,9 +928,38 @@ get_download_url() {
         log_info "$(msg snapshot_found "$latest_snapshot")" >&2
         echo "https://github.com/${REPO}/releases/download/${latest_snapshot}/${file_name}"
     else
-        # 稳定版：使用 latest
-        echo "https://github.com/${REPO}/releases/latest/download/${file_name}"
+        # 稳定版：先解析出具体的 tag，二进制和 SHA256SUMS 都从同一个
+        # /releases/download/<tag>/ 下载，避免两次 /latest/ 请求落到不同版本。
+        log_info "$(msg fetch_latest)" >&2
+        local latest_tag
+        latest_tag=$(resolve_latest_tag)
+        if [ -z "$latest_tag" ]; then
+            log_error "$(msg latest_not_found)" >&2
+            return 1
+        fi
+        log_info "$(msg latest_found "$latest_tag")" >&2
+        echo "https://github.com/${REPO}/releases/download/${latest_tag}/${file_name}"
     fi
+}
+
+# 解析最新正式版的 tag。优先用 GitHub API；API 受限（例如匿名请求被限流）时，
+# 退回到跟随 /releases/latest 的跳转，从最终地址里取出 tag。
+resolve_latest_tag() {
+    local tag
+    tag=$(curl -fsSL --connect-timeout 30 "https://api.github.com/repos/${REPO}/releases/latest" 2>/dev/null |
+        grep '"tag_name"' | head -1 | sed -e 's/.*"tag_name": *"//' -e 's/".*//')
+    if [ -z "$tag" ]; then
+        local effective
+        effective=$(curl -fsSLI --connect-timeout 30 -o /dev/null -w '%{url_effective}' \
+            "https://github.com/${REPO}/releases/latest" 2>/dev/null)
+        case "$effective" in
+            */releases/tag/*)
+                tag="${effective##*/releases/tag/}"
+                tag="${tag%%[/?#]*}"
+                ;;
+        esac
+    fi
+    printf '%s\n' "$tag"
 }
 
 # Format bytes with a compact, human-readable unit.
@@ -1086,21 +1131,58 @@ download_checksums() {
     esac
 }
 
+# 计算文件的 SHA-256，输出小写十六进制。依次尝试 sha256sum、shasum -a 256、
+# openssl dgst -sha256 -r；返回 3 表示系统里没有任何可用的 SHA-256 工具。
+compute_sha256() {
+    local file="$1"
+    local hash=""
+    if command -v sha256sum >/dev/null 2>&1; then
+        hash=$(sha256sum "$file" 2>/dev/null | awk '{ print $1 }')
+    fi
+    if [ -z "$hash" ] && command -v shasum >/dev/null 2>&1; then
+        hash=$(shasum -a 256 "$file" 2>/dev/null | awk '{ print $1 }')
+    fi
+    if [ -z "$hash" ] && command -v openssl >/dev/null 2>&1; then
+        hash=$(openssl dgst -sha256 -r "$file" 2>/dev/null | awk '{ print $1 }')
+    fi
+    if [ -z "$hash" ]; then
+        if ! command -v sha256sum >/dev/null 2>&1 &&
+            ! command -v shasum >/dev/null 2>&1 &&
+            ! command -v openssl >/dev/null 2>&1; then
+            return 3
+        fi
+        return 1
+    fi
+    printf '%s\n' "$hash" | tr 'A-F' 'a-f'
+}
+
 # 在下载目录内按资产名校验 SHA256SUMS。
-# 返回 0：校验通过；2：清单中没有该资产；1：校验不匹配。
+# 不用 sha256sum -c --ignore-missing：CentOS/RHEL 7 的 coreutils 8.22 不支持该参数，
+# 合法的二进制也会被判成篡改。这里用 awk 取出该文件名对应的期望哈希，自行比较。
+# 返回 0：校验通过；1：校验不匹配；2：清单中没有该资产；3：没有可用的 SHA-256 工具。
 verify_binary_checksum() {
     local work_dir="$1"
     local asset_name="$2"
+    local expected actual
 
-    if ! awk -v name="$asset_name" '
-        { file = $2; sub(/^\*/, "", file); if (file == name) found = 1 }
-        END { exit(found ? 0 : 1) }
-    ' "$work_dir/SHA256SUMS"; then
+    expected=$(awk -v name="$asset_name" '
+        { sub(/\r$/, "") }
+        NF >= 2 { file = $2; sub(/^\*/, "", file); if (file == name) { print tolower($1); exit } }
+    ' "$work_dir/SHA256SUMS")
+    if [ -z "$expected" ]; then
         return 2
     fi
 
-    # --ignore-missing 允许清单中列出其它平台的资产而只校验已下载的本平台二进制。
-    ( cd "$work_dir" && sha256sum -c --ignore-missing SHA256SUMS >/dev/null 2>&1 )
+    actual=$(compute_sha256 "$work_dir/$asset_name")
+    local status=$?
+    if [ "$status" -ne 0 ]; then
+        return "$status"
+    fi
+
+    if [ "$actual" = "$expected" ]; then
+        return 0
+    fi
+    return 1
 }
 
 # 下载二进制并在安装前完成完整性校验。
@@ -1146,6 +1228,11 @@ download_and_verify_binary() {
             local verify_status=$?
             if [ "$verify_status" -eq 2 ]; then
                 log_error "$(msg checksums_asset_missing "$asset_name")"
+                rm -rf "$work_dir"
+                return 1
+            elif [ "$verify_status" -eq 3 ]; then
+                # 没有校验工具不是"篡改"，给出单独的提示。
+                log_error "$(msg checksums_no_tool)"
                 rm -rf "$work_dir"
                 return 1
             elif [ "$verify_status" -ne 0 ]; then
@@ -1215,8 +1302,9 @@ install_binary() {
     log_step "$(msg create_data_dir "$DATA_DIR")"
     mkdir -p "$DATA_DIR"
 
-    local download_url=$(get_download_url "$arch")
-    if [ $? -ne 0 ]; then
+    local download_url
+    download_url=$(get_download_url "$arch")
+    if [ $? -ne 0 ] || [ -z "$download_url" ]; then
         ui_msgbox "$(msg title_error)" "$(msg download_url_failed)"
         return 1
     fi
@@ -1409,8 +1497,9 @@ upgrade_komari() {
     fi
 
     local arch=$(detect_arch)
-    local download_url=$(get_download_url "$arch")
-    if [ $? -ne 0 ]; then
+    local download_url
+    download_url=$(get_download_url "$arch")
+    if [ $? -ne 0 ] || [ -z "$download_url" ]; then
         log_error "$(msg download_url_failed_log)"
         mv "$backup_path" "$BINARY_PATH"
         systemctl start ${SERVICE_NAME}.service

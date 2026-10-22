@@ -1,0 +1,49 @@
+name: Attach release checksums
+description: >-
+  Download the komari server binaries attached to a GitHub release, generate
+  SHA256SUMS for them and upload it to the same release, replacing any
+  existing SHA256SUMS. Run it after every step that (re)uploads binaries.
+
+inputs:
+  tag:
+    description: Release tag whose binaries are hashed and to which SHA256SUMS is attached.
+    required: true
+  repository:
+    description: owner/name of the repository that owns the release.
+    default: ${{ github.repository }}
+  github-token:
+    description: Token with contents:write permission on the repository.
+    required: true
+
+runs:
+  using: composite
+  steps:
+    - name: Generate and upload SHA256SUMS
+      shell: bash
+      env:
+        GH_TOKEN: ${{ inputs.github-token }}
+        RELEASE_TAG: ${{ inputs.tag }}
+        RELEASE_REPO: ${{ inputs.repository }}
+      run: |
+        set -euo pipefail
+        dist="$RUNNER_TEMP/komari-release-checksums"
+        rm -rf "$dist"
+        mkdir -p "$dist"
+
+        # 只对安装脚本会下载的服务端二进制计算哈希；komari-frontend* 等构建产物不纳入。
+        gh release download "$RELEASE_TAG" --repo "$RELEASE_REPO" --dir "$dist" \
+          --pattern 'komari-linux-*' --pattern 'komari-windows-*'
+
+        cd "$dist"
+        shopt -s nullglob
+        binaries=(komari-linux-* komari-windows-*)
+        if [ "${#binaries[@]}" -eq 0 ]; then
+          echo "::error::No komari-linux-*/komari-windows-* assets found on release ${RELEASE_TAG}"
+          exit 1
+        fi
+
+        # 标准的 "<hash>  <filename>" 行，按文件名排序，便于比对。
+        sha256sum "${binaries[@]}" | sort -k2 > SHA256SUMS
+        cat SHA256SUMS
+
+        gh release upload "$RELEASE_TAG" SHA256SUMS --repo "$RELEASE_REPO" --clobber

@@ -238,6 +238,22 @@ jobs:
           done
         shell: bash
 
+  attach-checksums:
+    needs: [prepare, publish-snapshot-release]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      # 快照也生成 SHA256SUMS，安装脚本的 snapshot 通道同样能校验。
+      - name: Attach SHA256SUMS
+        uses: ./.github/actions/attach-checksums
+        with:
+          tag: ${{ needs.prepare.outputs.version }}
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+
   build-and-push-docker:
     needs: [prepare, build-and-attach-binaries, publish-snapshot-release]
     runs-on: ubuntu-latest
